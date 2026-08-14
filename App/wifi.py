@@ -1,0 +1,125 @@
+import network
+import uasyncio as asyncio
+
+import display
+from secrets import SSID, PASSWORD
+
+wlan = None
+display.init()
+
+
+def _new_wlan():
+    station = network.WLAN(network.STA_IF)
+    station.active(True)
+    station.config(dhcp_hostname="esp32")
+    return station
+
+
+async def _join_wifi(station, timeout_s=20):
+    """Join Wi-Fi without blocking the rest of the asyncio application."""
+
+    if station.isconnected():
+        return True
+
+    station.connect(SSID, PASSWORD)
+
+    for second in range(timeout_s):
+        if station.isconnected():
+            return True
+
+        if second in (4, 9, 14):
+            print(
+                "WiFi still connecting...",
+                second + 1,
+                "s"
+            )
+
+        await asyncio.sleep(1)
+
+    return station.isconnected()
+
+
+async def connect_wifi():
+    global wlan
+
+    station = _new_wlan()
+
+    print("Connecting to WiFi:", SSID)
+    display.text("Connecting", 0, 0, clear=True)
+    display.text("to WiFi:", 0, 10, clear=False)
+    display.text(SSID, 0, 30, clear=False)
+
+    if await _join_wifi(station):
+        wlan = station
+        myIp = wlan.ifconfig()[0]
+        print("Connection IP:", myIp)
+        display.text("Connection IP:", 0, 0, clear=True)
+        display.text(myIp, 0, 20, clear=False)
+        return wlan
+
+    print(
+        "WiFi unavailable at startup; "
+        "the application will keep retrying"
+    )
+    display.text("Connecting...", 0, 0, clear=True)
+
+    return None
+
+
+async def wifi_watchdog():
+    global wlan
+
+    failed_attempts = 0
+
+    while True:
+        if wlan is None or not wlan.isconnected():
+            print("WiFi lost! Reconnecting...")
+            display.text("WiFi lost! ", 0, 0, clear=True)
+            display.text("Reconnecting...", 0, 10, clear=False)
+
+            try:
+                if wlan is not None:
+                    wlan.disconnect()
+                    wlan.active(False)
+
+                    await asyncio.sleep(1)
+
+                wlan = _new_wlan()
+
+                if await _join_wifi(wlan):
+                    failed_attempts = 0
+
+                    print(
+                        "WiFi restored:",
+                        wlan.ifconfig()[0]
+                    )
+
+                else:
+                    failed_attempts += 1
+
+                    delay = min(
+                        60,
+                        5 * (2 ** min(failed_attempts - 1, 3)))
+
+                    print(
+                        "WiFi reconnect failed; retry in",
+                        delay,
+                        "s"
+                    )
+
+                    await asyncio.sleep(delay)
+
+            except Exception as e:
+                failed_attempts += 1
+
+                print(
+                    "WiFi reconnect error:",
+                    e
+                )
+                display.text("WiFi error", 0, 0, clear=True)
+
+        await asyncio.sleep(15)
+
+
+def wifi_is_connected():
+    return wlan is not None and wlan.isconnected()
