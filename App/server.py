@@ -9,6 +9,7 @@ import dimmer
 import esp_config
 import relay
 import sensor
+import display
 
 API_TOKEN = "hftqpPVbeLwaqPDfJ25eCzxRETqsoX8sh1K56NRUp2zW8GxHr1M6u5s4fEMv"
 
@@ -265,6 +266,38 @@ async def handle_request(reader, writer):
 
             writer.write(
                 (headers + body).encode()
+            )
+
+            await writer.drain()
+            return
+
+        if method == "POST" and path == "/api/display/toggle":
+            enabled = not config.get(
+                "display",
+                {}
+            ).get(
+                "enabled",
+                False
+            )
+
+            config["display"]["enabled"] = enabled
+
+            config_store.save(config)
+
+            print(
+                "Display:",
+                "ON" if enabled else "OFF"
+            )
+
+            display.toggle(enabled)
+
+            writer.write(
+                (
+                        "HTTP/1.1 200 OK\r\n"
+                        + cors +
+                        "\r\n"
+                        "OK"
+                ).encode()
             )
 
             await writer.drain()

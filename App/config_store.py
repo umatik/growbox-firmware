@@ -22,6 +22,9 @@ DEFAULT_CONFIG = {
     "sensor": {
         "enabled": True,
         "interval": 10000
+    },
+    "display": {
+        "enabled": False,
     }
 }
 
