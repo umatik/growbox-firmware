@@ -8,10 +8,13 @@ import ssd1306
 _oled = None
 _state_provider = None
 _enabled = False
+_button_led = None
 
 
 def init():
     global _oled
+    global _enabled
+    global _button_led
 
     i2c = I2C(
         1,
@@ -27,7 +30,23 @@ def init():
         addr=0x3C
     )
 
+    _button_led = Pin(
+        esp_config.PINS["lcd_button_led"],
+        Pin.OUT,
+        value=0
+    )
+
+    _enabled = True
+    _button_led.value(1)
+
     _oled.fill(0)
+
+    _oled.text(
+        "Starting...",
+        0,
+        0
+    )
+
     _oled.show()
 
 
@@ -37,14 +56,33 @@ def set_state_provider(provider):
     _state_provider = provider
 
 
+def boot_step(message):
+    if _oled is None:
+        return
+
+    _oled.fill(0)
+
+    _oled.text(
+        str(message),
+        0,
+        0
+    )
+
+    _oled.show()
+
+
 def text(message, x=0, y=0, clear=True):
-    if _oled is None or not _enabled:
+    if _oled is None:
         return
 
     if clear:
         _oled.fill(0)
 
-    _oled.text(str(message), x, y)
+    _oled.text(
+        str(message),
+        x,
+        y
+    )
 
     _oled.show()
 
@@ -70,8 +108,35 @@ def show():
     _oled.show()
 
 
+def is_enabled():
+    return _enabled
+
+
+def set_enabled(enabled):
+    global _enabled
+
+    _enabled = enabled
+
+    if _button_led is not None:
+        _button_led.value(
+            1 if enabled else 0
+        )
+
+    if _oled is None:
+        return
+
+    if enabled:
+        render_dashboard()
+    else:
+        _oled.fill(0)
+        _oled.show()
+
+
 def render_dashboard():
     if _oled is None or _state_provider is None:
+        return
+
+    if not _enabled:
         return
 
     state = _state_provider()
@@ -93,6 +158,7 @@ def render_dashboard():
     )
 
     flowering_text = ""
+
     flowering_start = state.get(
         "floweringStartDate"
     )
@@ -120,18 +186,18 @@ def render_dashboard():
             now_timestamp = utime.mktime(now)
 
             flowering_week = (
-                (
-                    (
-                        now_timestamp
-                        - start_timestamp
-                    ) // 86400
-                ) // 7
-            ) + 1
+                                     (
+                                             (
+                                                     now_timestamp
+                                                     - start_timestamp
+                                             ) // 86400
+                                     ) // 7
+                             ) + 1
 
             if flowering_week > 0:
                 flowering_text = (
-                    ", T%d  "
-                    % flowering_week
+                        ", T%d  "
+                        % flowering_week
                 )
 
         except Exception:
@@ -147,10 +213,11 @@ def render_dashboard():
         )
 
         mode_text = (
-            "AUTO: "
-            + day_night
-            + flowering_text
+                "AUTO: "
+                + day_night
+                + flowering_text
         )
+
     else:
         day_night = (
             "DAY"
@@ -159,8 +226,8 @@ def render_dashboard():
         )
 
         mode_text = (
-            "MANUAL: "
-            + day_night
+                "MANUAL: "
+                + day_night
         )
 
     light_text = (
@@ -171,8 +238,8 @@ def render_dashboard():
 
     if state["fan"]:
         if (
-            mode == "AUTO"
-            and day_night == "NIGHT"
+                mode == "AUTO"
+                and day_night == "NIGHT"
         ):
             fan_text = "ON (NIGHT)"
         else:
@@ -191,23 +258,23 @@ def render_dashboard():
     )
 
     if isinstance(
-        temperature,
-        (int, float)
+            temperature,
+            (int, float)
     ):
         temperature = (
-            str(int(temperature))
-            + "C"
+                str(int(temperature))
+                + "C"
         )
     else:
         temperature = "--"
 
     if isinstance(
-        humidity,
-        (int, float)
+            humidity,
+            (int, float)
     ):
         humidity = (
-            str(int(humidity))
-            + "%"
+                str(int(humidity))
+                + "%"
         )
     else:
         humidity = "--"
@@ -221,17 +288,29 @@ def render_dashboard():
     )
 
     time_width = (
-        len(time_str) * 8
+            len(time_str) * 8
     )
 
-    x_time = max(
-        0,
-        128 - time_width
+    sd_width = 16
+    gap = 5
+
+    x_sd = 128 - sd_width
+
+    x_time = (
+            x_sd
+            - gap
+            - time_width
     )
 
     _oled.text(
         time_str,
         x_time,
+        0
+    )
+
+    _oled.text(
+        "SD",
+        x_sd,
         0
     )
 
@@ -270,18 +349,7 @@ def refresh():
 
 
 def toggle(enabled):
-    global _enabled
-
-    _enabled = enabled
-
-    if _oled is None:
-        return
-
-    if enabled:
-        render_dashboard()
-    else:
-        _oled.fill(0)
-        _oled.show()
+    set_enabled(enabled)
 
 
 async def display_updater():
@@ -296,4 +364,4 @@ async def display_updater():
                 e
             )
 
-        await asyncio.sleep(1)
+        await asyncio.sleep_ms(1000)

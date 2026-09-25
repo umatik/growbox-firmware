@@ -21,6 +21,10 @@ PINS = {
     "sd_sck": 27,
     "sd_mosi": 26,
     "sd_miso": 25,
+
+    # LCD button
+    "lcd_button": 15,
+    "lcd_button_led": 16,
 }
 
 DIMMER_DEFAULTS = {

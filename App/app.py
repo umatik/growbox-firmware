@@ -1,6 +1,8 @@
 import uasyncio as asyncio
 
+import button
 import display
+import esp_config
 import sd_logger
 import sensor
 from ntp import sync_ntp
@@ -10,6 +12,18 @@ from server import (
     start_server,
 )
 from wifi import connect_wifi
+
+
+def toggle_lcd():
+    display.toggle(
+        not display.is_enabled()
+    )
+
+
+lcd_button = button.Button(
+    pin=esp_config.PINS["lcd_button"],
+    on_release=toggle_lcd,
+)
 
 
 async def main():
