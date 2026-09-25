@@ -24,7 +24,7 @@ async def main():
     await connect_wifi()
     await sync_ntp()
 
-    sd_logger.init(5)
+    sd_logger.init(120)
 
     await asyncio.gather(
         start_server(),

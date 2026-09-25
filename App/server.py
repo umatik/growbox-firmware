@@ -2,12 +2,14 @@ import json
 
 import uasyncio as asyncio
 import utime
+
 import config_store
 import dimmer
+import display
 import esp_config
 import relay
+import sd_logger
 import sensor
-import display
 
 API_TOKEN = "hftqpPVbeLwaqPDfJ25eCzxRETqsoX8sh1K56NRUp2zW8GxHr1M6u5s4fEMv"
 
@@ -20,7 +22,9 @@ DEFAULT_LIGHT_SCHEDULE = [
     }
 ]
 
+
 # --- Relays ---
+
 def _on_light_change(state):
     print("Server Light state:", state)
     config["relayLight"]["state"] = state
@@ -45,7 +49,6 @@ fan_relay = relay.Relay(
     on_change=_on_fan_change
 )
 
-
 # --- Dimmer ---
 
 _dimmer = dimmer.Dimmer(
@@ -57,7 +60,7 @@ _dimmer = dimmer.Dimmer(
 )
 
 
-# Scheduler
+# --- Scheduler ---
 
 def _parse_time(value):
     return int(value[0:2]) * 60 + int(value[3:5])
@@ -98,14 +101,29 @@ def apply_auto_logic():
     else:
         light_relay.off()
 
-    night_fan = config.get("auto", {}).get("nightFan", {}).get("enabled", False)
+    night_fan = config.get(
+        "auto",
+        {}
+    ).get(
+        "nightFan",
+        {}
+    ).get(
+        "enabled",
+        False
+    )
 
     if should_on or night_fan:
         fan_relay.on()
     else:
         fan_relay.off()
 
-    if config.get("dimmer", {}).get("enabled", False):
+    if config.get(
+            "dimmer",
+            {}
+    ).get(
+        "enabled",
+        False
+    ):
         if should_on:
             _dimmer.set_level(
                 config["dimmer"]["day"]["level"]
@@ -118,16 +136,25 @@ def apply_auto_logic():
 
 async def clock_scheduler():
     while True:
-        if config.get("auto", {}).get("enabled", False):
+        if config.get(
+                "auto",
+                {}
+        ).get(
+            "enabled",
+            False
+        ):
             apply_auto_logic()
 
         await asyncio.sleep(30)
 
 
-# Authorization
+# --- Authorization ---
 
 def _is_authorized(request):
-    expected = "Authorization: Bearer " + API_TOKEN
+    expected = (
+            "Authorization: Bearer "
+            + API_TOKEN
+    )
 
     for line in request.split("\r\n"):
         if line == expected:
@@ -136,7 +163,29 @@ def _is_authorized(request):
     return False
 
 
-# HTTP Server
+def _parse_query(path):
+    query = {}
+
+    if "?" not in path:
+        return query
+
+    raw_query = path.split("?", 1)[1]
+
+    for item in raw_query.split("&"):
+        if "=" not in item:
+            continue
+
+        key, value = item.split("=", 1)
+
+        value = value.replace("%20", " ")
+        value = value.replace("+", " ")
+
+        query[key] = value
+
+    return query
+
+
+# --- HTTP Server ---
 
 async def handle_request(reader, writer):
     try:
@@ -154,9 +203,13 @@ async def handle_request(reader, writer):
             else "/"
         )
 
+        route = path.split("?", 1)[0]
+        query = _parse_query(path)
+
         cors = (
             "Access-Control-Allow-Origin: *\r\n"
-            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+            "Access-Control-Allow-Methods: "
+            "GET, POST, OPTIONS\r\n"
             "Access-Control-Allow-Headers: "
             "Content-Type, Authorization\r\n"
         )
@@ -194,6 +247,7 @@ async def handle_request(reader, writer):
             return
 
         # GET /api/config
+
         if method == "GET" and path == "/api/config":
             sensor_data = sensor.get()
 
@@ -215,7 +269,6 @@ async def handle_request(reader, writer):
                         )
                         else "MANUAL"
                     ),
-
                     "state": (
                         "ON"
                         if light_relay.get_state()
@@ -242,6 +295,8 @@ async def handle_request(reader, writer):
 
             await writer.drain()
             return
+
+        # POST /api/display/toggle
 
         if method == "POST" and path == "/api/display/toggle":
             enabled = not config.get(
@@ -275,6 +330,8 @@ async def handle_request(reader, writer):
             await writer.drain()
             return
 
+        # POST /api/mode/toggle
+
         if method == "POST" and path == "/api/mode/toggle":
             enabled = not config.get(
                 "auto",
@@ -296,7 +353,16 @@ async def handle_request(reader, writer):
             if enabled:
                 apply_auto_logic()
             else:
-                if config.get("auto", {}).get("nightFan", {}).get("enabled", False):
+                if config.get(
+                        "auto",
+                        {}
+                ).get(
+                    "nightFan",
+                    {}
+                ).get(
+                    "enabled",
+                    False
+                ):
                     _dimmer.set_level(
                         config["dimmer"]["day"]["level"]
                     )
@@ -313,6 +379,8 @@ async def handle_request(reader, writer):
             await writer.drain()
             return
 
+        # POST /api/light/toggle
+
         if method == "POST" and path == "/api/light/toggle":
             light_relay.toggle()
 
@@ -328,6 +396,8 @@ async def handle_request(reader, writer):
             await writer.drain()
             return
 
+        # POST /api/fan/toggle
+
         if method == "POST" and path == "/api/fan/toggle":
             fan_relay.toggle()
 
@@ -342,6 +412,8 @@ async def handle_request(reader, writer):
 
             await writer.drain()
             return
+
+        # POST /api/fan/level
 
         if method == "POST" and path == "/api/fan/level":
             body_start = request.find("\r\n\r\n")
@@ -387,6 +459,8 @@ async def handle_request(reader, writer):
 
             await writer.drain()
             return
+
+        # POST /api/fan/night-level
 
         if method == "POST" and path == "/api/fan/night-level":
             body_start = request.find("\r\n\r\n")
@@ -443,6 +517,8 @@ async def handle_request(reader, writer):
             await writer.drain()
             return
 
+        # POST /api/auto/night-fan/toggle
+
         if method == "POST" and path == "/api/auto/night-fan/toggle":
             if "auto" not in config:
                 config["auto"] = {}
@@ -472,6 +548,8 @@ async def handle_request(reader, writer):
 
             await writer.drain()
             return
+
+        # POST /api/light-schedule
 
         if method == "POST" and path == "/api/light-schedule":
             body_start = request.find("\r\n\r\n")
@@ -524,6 +602,8 @@ async def handle_request(reader, writer):
             await writer.drain()
             return
 
+        # POST /api/flowering/start-date
+
         if method == "POST" and path == "/api/flowering/start-date":
             body_start = request.find("\r\n\r\n")
 
@@ -534,7 +614,10 @@ async def handle_request(reader, writer):
 
                 start_date = body.get("date")
 
-                if start_date is not None and not isinstance(start_date, str):
+                if (
+                        start_date is not None
+                        and not isinstance(start_date, str)
+                ):
                     raise ValueError(
                         "Flowering start date must be a string or null"
                     )
@@ -553,6 +636,104 @@ async def handle_request(reader, writer):
                         "\r\n"
                         "OK"
                 ).encode()
+            )
+
+            await writer.drain()
+            return
+
+        # POST /api/environment/start
+
+        if method == "POST" and path == "/api/environment/start":
+            started = sd_logger.start()
+
+            body = json.dumps({
+                "status": (
+                    "started"
+                    if started
+                    else "offline"
+                )
+            })
+
+            headers = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: {}\r\n"
+                "Connection: close\r\n"
+                "{}"
+                "\r\n"
+            ).format(
+                len(body.encode()),
+                cors
+            )
+
+            writer.write(
+                (headers + body).encode()
+            )
+
+            await writer.drain()
+            return
+
+        # GET /api/environment
+
+        if method == "GET" and route == "/api/environment":
+            limit = query.get(
+                "limit",
+                "500"
+            )
+
+            before = query.get(
+                "before"
+            )
+
+            body = json.dumps(
+                sd_logger.get_environment(
+                    limit=limit,
+                    before=before
+                )
+            )
+
+            headers = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: {}\r\n"
+                "Connection: close\r\n"
+                "{}"
+                "\r\n"
+            ).format(
+                len(body.encode()),
+                cors
+            )
+
+            writer.write(
+                (headers + body).encode()
+            )
+
+            await writer.drain()
+            return
+
+        # POST /api/environment/erase
+
+        if method == "POST" and path == "/api/environment/erase":
+            sd_logger.erase()
+
+            body = json.dumps({
+                "status": "erased"
+            })
+
+            headers = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: {}\r\n"
+                "Connection: close\r\n"
+                "{}"
+                "\r\n"
+            ).format(
+                len(body.encode()),
+                cors
+            )
+
+            writer.write(
+                (headers + body).encode()
             )
 
             await writer.drain()
@@ -582,7 +763,8 @@ async def handle_request(reader, writer):
         await writer.wait_closed()
 
 
-# Display
+# --- Display ---
+
 def wifi_is_connected():
     import network
 
@@ -626,7 +808,7 @@ def get_display_state():
     }
 
 
-# Server
+# --- Server ---
 
 async def start_server():
     server = await asyncio.start_server(

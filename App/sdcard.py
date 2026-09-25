@@ -220,6 +220,18 @@ class SDCard:
 
         return False
 
+    def _wait_until_ready(self, timeout=1000):
+        for _ in range(timeout):
+            if self.spi.read(
+                    1,
+                    0xFF
+            )[0] == 0xFF:
+                return True
+
+        raise OSError(
+            "SD write timeout"
+        )
+
     def readblocks(
             self,
             block_num,
@@ -348,13 +360,7 @@ class SDCard:
                     "SD write rejected"
                 )
 
-            while (
-                    self.spi.read(
-                        1,
-                        0xFF
-                    )[0] == 0
-            ):
-                pass
+            self._wait_until_ready()
 
             self._end_command()
 
@@ -405,13 +411,7 @@ class SDCard:
                     "SD multi-write rejected"
                 )
 
-            while (
-                    self.spi.read(
-                        1,
-                        0xFF
-                    )[0] == 0
-            ):
-                pass
+            self._wait_until_ready()
 
         self.spi.write(
             bytes([0xFD])
