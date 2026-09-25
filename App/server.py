@@ -2,8 +2,6 @@ import json
 
 import uasyncio as asyncio
 import utime
-from machine import Pin
-
 import config_store
 import dimmer
 import esp_config
@@ -22,41 +20,17 @@ DEFAULT_LIGHT_SCHEDULE = [
     }
 ]
 
-fan_led = Pin(
-    esp_config.PINS["btn_fan_led"],
-    Pin.OUT,
-)
-
-light_led = Pin(
-    esp_config.PINS["btn_light_led"],
-    Pin.OUT,
-)
-
-
-# --- Button LEDs ---
-def _set_fan_led(state):
-    # LED is active LOW
-    fan_led.value(0 if state else 1)
-
-
-def _set_light_led(state):
-    # LED is active LOW
-    light_led.value(0 if state else 1)
-
-
 # --- Relays ---
 def _on_light_change(state):
     print("Server Light state:", state)
     config["relayLight"]["state"] = state
     config_store.save(config)
-    _set_light_led(state)
 
 
 def _on_fan_change(state):
     print("Server Fan state:", state)
     config["relayFan"]["state"] = state
     config_store.save(config)
-    _set_fan_led(state)
 
 
 light_relay = relay.Relay(
@@ -71,8 +45,6 @@ fan_relay = relay.Relay(
     on_change=_on_fan_change
 )
 
-_set_fan_led(fan_relay.get_state())
-_set_light_led(light_relay.get_state())
 
 # --- Dimmer ---
 

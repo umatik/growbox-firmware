@@ -9,24 +9,18 @@ PINS = {
     "dimmer_pwm": 21,
 
     # 3.3V
-    "btn_light_led": 25,
-    "btn_light": 13,
-
-    # 3.3V
-    "btn_fan_led": 26,
-    "btn_fan": 14,
-
-    # 3.3V
-    "btn_auto_led": 17,
-    "btn_auto": 27,
-
-    # 3.3V
     "sensor_sda": 32,
     "sensor_scl": 33,
 
     # 5V
     "oled_sda": 18,
     "oled_scl": 19,
+
+    # SD card
+    "sd_cs": 4,
+    "sd_sck": 27,
+    "sd_mosi": 26,
+    "sd_miso": 25,
 }
 
 DIMMER_DEFAULTS = {
