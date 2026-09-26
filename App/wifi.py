@@ -12,6 +12,14 @@ def _new_wlan():
     station = network.WLAN(network.STA_IF)
     station.active(True)
     station.config(dhcp_hostname="esp32")
+
+    # Wylacz oszczedzanie energii WiFi - z nim ESP32 gubi/opoznia ACK-i
+    # i dluzsze odpowiedzi HTTP potrafia stanac.
+    try:
+        station.config(pm=station.PM_NONE)
+    except (AttributeError, ValueError):
+        pass  # starsze MicroPython nie maja PM_NONE
+
     return station
 
 

@@ -36,6 +36,12 @@ def _on_fan_change(state):
     config["relayFan"]["state"] = state
     config_store.save(config)
 
+    # przelaczenie wentylatora potrafi zaklocic przekaznik swiatla
+    try:
+        asyncio.create_task(_verify_light_after_fan())
+    except Exception as e:
+        print("Light verify start error:", e)
+
 
 light_relay = relay.Relay(
     pin=esp_config.PINS["relay_light"],
@@ -58,6 +64,35 @@ _dimmer = dimmer.Dimmer(
     freq=esp_config.DIMMER_DEFAULTS["freq"],
     max_level=esp_config.DIMMER_DEFAULTS["max_level"],
 )
+
+
+# --- Weryfikacja swiatla ---
+
+# Kiedy (s po przelaczeniu wentylatora) sprawdzic pin swiatla.
+_LIGHT_VERIFY_DELAYS = (0.2, 1, 3)
+
+
+async def _verify_light_after_fan():
+    expected = light_relay.get_state()
+
+    for delay in _LIGHT_VERIFY_DELAYS:
+        await asyncio.sleep(delay)
+
+        # ktos celowo zmienil swiatlo w miedzyczasie - nie wtracamy sie
+        if light_relay.get_state() != expected:
+            return
+
+        if light_relay.refresh():
+            print("LIGHT: pin mismatch after fan switch -> restored", expected)
+
+
+def _refresh_relays():
+    """Cykliczne wymuszenie stanu pinow - naprawia ewentualne zaklocenia."""
+    if light_relay.refresh():
+        print("LIGHT: pin mismatch -> restored", light_relay.get_state())
+
+    if fan_relay.refresh():
+        print("FAN: pin mismatch -> restored", fan_relay.get_state())
 
 
 # --- Scheduler ---
@@ -90,8 +125,19 @@ def _should_light_be_on():
     return False
 
 
+def time_is_valid():
+    # przed synchronizacja NTP zegar ESP startuje od 2000 roku
+    return utime.localtime()[0] >= 2024
+
+
 def apply_auto_logic():
     if not config.get("auto", {}).get("enabled", False):
+        return
+
+    # bez prawdziwej godziny harmonogram przelaczalby na slepo -
+    # zostaw przekazniki w ostatnim zapisanym stanie
+    if not time_is_valid():
+        print("AUTO: no valid time, keeping relay states")
         return
 
     should_on = _should_light_be_on()
@@ -134,16 +180,37 @@ def apply_auto_logic():
             )
 
 
+# Ostatni obieg harmonogramu - watchdog karmi ESP tylko, gdy to jest swieze.
+_scheduler_tick = utime.ticks_ms()
+
+
+def scheduler_age_ms():
+    return utime.ticks_diff(utime.ticks_ms(), _scheduler_tick)
+
+
 async def clock_scheduler():
+    global _scheduler_tick
+
     while True:
-        if config.get(
-                "auto",
-                {}
-        ).get(
-            "enabled",
-            False
-        ):
-            apply_auto_logic()
+        # blad w jednym obiegu nie moze zatrzymac kolejnych
+        try:
+            if config.get(
+                    "auto",
+                    {}
+            ).get(
+                "enabled",
+                False
+            ):
+                apply_auto_logic()
+        except Exception as e:
+            print("SCHED: auto error:", repr(e))
+
+        try:
+            _refresh_relays()
+        except Exception as e:
+            print("SCHED: refresh error:", repr(e))
+
+        _scheduler_tick = utime.ticks_ms()
 
         await asyncio.sleep(30)
 
@@ -163,6 +230,33 @@ def _is_authorized(request):
     return False
 
 
+def _url_decode(value):
+    value = value.replace("+", " ")
+
+    if "%" not in value:
+        return value
+
+    out = bytearray()
+    i = 0
+    n = len(value)
+
+    while i < n:
+        c = value[i]
+
+        if c == "%" and i + 2 < n:
+            try:
+                out.append(int(value[i + 1:i + 3], 16))
+                i += 3
+                continue
+            except ValueError:
+                pass
+
+        out.extend(c.encode())
+        i += 1
+
+    return out.decode()
+
+
 def _parse_query(path):
     query = {}
 
@@ -177,19 +271,61 @@ def _parse_query(path):
 
         key, value = item.split("=", 1)
 
-        value = value.replace("%20", " ")
-        value = value.replace("+", " ")
-
-        query[key] = value
+        query[_url_decode(key)] = _url_decode(value)
 
     return query
+
+
+# --- Timeouty I/O ---
+
+# Bez limitu handler, ktoremu klient przestal odbierac, wisi w drain()
+# w nieskonczonosc i trzyma socket. Po kilku takich lwIP nie ma wolnych
+# socketow i serwer przestaje przyjmowac polaczenia.
+_IO_TIMEOUT = 15
+
+
+async def _drain(writer):
+    await asyncio.wait_for(writer.drain(), _IO_TIMEOUT)
+
+
+# --- Environment JSON (streaming) ---
+
+# Przerwa miedzy porcjami (s) - daje lwIP czas na ACK-i.
+_WRITE_PAUSE = 0.01
+
+
+async def _send_environment_json(writer, cors, query):
+    """
+    JSON z sd_logger idzie prosto do socketu, porcja po porcji
+    (bez Content-Length: koniec odpowiedzi = zamkniecie polaczenia).
+    """
+    writer.write(
+        (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n"
+                "Connection: close\r\n"
+                + cors +
+                "\r\n"
+        ).encode()
+    )
+
+    async def send(chunk):
+        writer.write(chunk)
+        await _drain(writer)
+        await asyncio.sleep(_WRITE_PAUSE)
+
+    await sd_logger.stream_environment_json(
+        send,
+        limit=query.get("limit", "500"),
+        before=query.get("before"),
+    )
 
 
 # --- HTTP Server ---
 
 async def handle_request(reader, writer):
     try:
-        request = await reader.read(2048)
+        request = await asyncio.wait_for(reader.read(2048), _IO_TIMEOUT)
         request = request.decode()
 
         lines = request.split("\r\n")
@@ -205,6 +341,8 @@ async def handle_request(reader, writer):
 
         route = path.split("?", 1)[0]
         query = _parse_query(path)
+
+        print("HTTP:", method, path, "mem", sd_logger.mem_info())
 
         cors = (
             "Access-Control-Allow-Origin: *\r\n"
@@ -226,7 +364,7 @@ async def handle_request(reader, writer):
                 ).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # Authorization
@@ -243,7 +381,7 @@ async def handle_request(reader, writer):
                 ).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # GET /api/config
@@ -293,7 +431,7 @@ async def handle_request(reader, writer):
                 (headers + body).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # POST /api/display/toggle
@@ -327,7 +465,7 @@ async def handle_request(reader, writer):
                 ).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # POST /api/mode/toggle
@@ -376,7 +514,7 @@ async def handle_request(reader, writer):
                 ).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # POST /api/light/toggle
@@ -393,7 +531,7 @@ async def handle_request(reader, writer):
                 ).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # POST /api/fan/toggle
@@ -410,7 +548,7 @@ async def handle_request(reader, writer):
                 ).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # POST /api/fan/level
@@ -457,7 +595,7 @@ async def handle_request(reader, writer):
                 ).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # POST /api/fan/night-level
@@ -514,7 +652,7 @@ async def handle_request(reader, writer):
                 ).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # POST /api/auto/night-fan/toggle
@@ -546,7 +684,7 @@ async def handle_request(reader, writer):
                 ).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # POST /api/light-schedule
@@ -599,7 +737,7 @@ async def handle_request(reader, writer):
                 ).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # POST /api/flowering/start-date
@@ -638,12 +776,12 @@ async def handle_request(reader, writer):
                 ).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # POST /api/environment/start
 
-        if method == "POST" and path == "/api/environment/start":
+        if method == "POST" and route == "/api/environment/start":
             started = sd_logger.start()
 
             body = json.dumps({
@@ -670,58 +808,77 @@ async def handle_request(reader, writer):
                 (headers + body).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
-        # GET /api/environment
+        # GET /api/environment.csv  (caly log jako plik CSV)
+
+        if method == "GET" and route == "/api/environment.csv":
+            if not sd_logger.is_enabled():
+                writer.write(
+                    (
+                            "HTTP/1.1 503 Service Unavailable\r\n"
+                            "Content-Type: text/plain\r\n"
+                            "Connection: close\r\n"
+                            + cors +
+                            "\r\n"
+                            "SD offline"
+                    ).encode()
+                )
+
+                await _drain(writer)
+                return
+
+            # bez Content-Length: koniec odpowiedzi = zamkniecie polaczenia
+            writer.write(
+                (
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: text/csv\r\n"
+                        "Content-Disposition: attachment; "
+                        "filename=\"environment.csv\"\r\n"
+                        "Connection: close\r\n"
+                        + cors +
+                        "\r\n"
+                ).encode()
+            )
+
+            await _drain(writer)
+
+            async def send(chunk):
+                writer.write(chunk)
+                await _drain(writer)
+
+            await sd_logger.stream_csv(send)
+            return
+
+        # GET /api/environment?limit=500&before=YYYY-MM-DD HH:MM:SS
 
         if method == "GET" and route == "/api/environment":
-            limit = query.get(
-                "limit",
-                "500"
+            await _send_environment_json(
+                writer,
+                cors,
+                query
             )
-
-            before = query.get(
-                "before"
-            )
-
-            body = json.dumps(
-                sd_logger.get_environment(
-                    limit=limit,
-                    before=before
-                )
-            )
-
-            headers = (
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/json\r\n"
-                "Content-Length: {}\r\n"
-                "Connection: close\r\n"
-                "{}"
-                "\r\n"
-            ).format(
-                len(body.encode()),
-                cors
-            )
-
-            writer.write(
-                (headers + body).encode()
-            )
-
-            await writer.drain()
             return
 
         # POST /api/environment/erase
 
-        if method == "POST" and path == "/api/environment/erase":
-            sd_logger.erase()
-
-            body = json.dumps({
-                "status": "erased"
-            })
+        if method == "POST" and route == "/api/environment/erase":
+            try:
+                sd_logger.erase()
+                status_line = "200 OK"
+                body = json.dumps({
+                    "status": "erased"
+                })
+            except OSError as e:
+                status_line = "503 Service Unavailable"
+                body = json.dumps({
+                    "status": "error",
+                    "error": str(e)
+                })
 
             headers = (
-                "HTTP/1.1 200 OK\r\n"
+                "HTTP/1.1 " + status_line + "\r\n"
                 "Content-Type: application/json\r\n"
                 "Content-Length: {}\r\n"
                 "Connection: close\r\n"
@@ -736,7 +893,7 @@ async def handle_request(reader, writer):
                 (headers + body).encode()
             )
 
-            await writer.drain()
+            await _drain(writer)
             return
 
         # 404
@@ -750,12 +907,12 @@ async def handle_request(reader, writer):
             ).encode()
         )
 
-        await writer.drain()
+        await _drain(writer)
 
     except Exception as e:
         print(
             "Request error:",
-            e
+            repr(e)
         )
 
     finally:
@@ -810,8 +967,13 @@ def get_display_state():
 
 # --- Server ---
 
+_server = None
+
+
 async def start_server():
-    server = await asyncio.start_server(
+    global _server
+
+    _server = await asyncio.start_server(
         handle_request,
         "0.0.0.0",
         80

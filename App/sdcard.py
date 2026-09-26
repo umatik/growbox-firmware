@@ -1,4 +1,4 @@
-from time import sleep_ms
+from time import sleep_ms, ticks_ms, ticks_diff
 
 from micropython import const
 
@@ -15,6 +15,7 @@ class SDCard:
     ):
         self.spi = spi
         self.cs = cs
+        self.baudrate = baudrate
 
         self.cs.init(
             cs.OUT,
@@ -24,8 +25,9 @@ class SDCard:
         self.cmdbuf = bytearray(6)
         self.dummy = bytearray([0xFF])
 
+        # inicjalizacja karty musi isc na <= 400 kHz
         self.spi.init(
-            baudrate=baudrate,
+            baudrate=400000,
             polarity=0,
             phase=0
         )
@@ -92,13 +94,21 @@ class SDCard:
 
         self._clock(10)
 
-        response = self._cmd(
-            0,
-            0,
-            0x95
-        )
+        # po wlaczeniu zasilania karta bywa jeszcze niegotowa - kilka prob CMD0
+        for _ in range(5):
+            response = self._cmd(
+                0,
+                0,
+                0x95
+            )
 
-        self._end_command()
+            self._end_command()
+
+            if response == 1:
+                break
+
+            sleep_ms(50)
+            self._clock(10)
 
         if response != 1:
             raise OSError(
@@ -200,8 +210,9 @@ class SDCard:
                 "SD block size error"
             )
 
+        # po inicjalizacji mozna przyspieszyc
         self.spi.init(
-            baudrate=400000,
+            baudrate=self.baudrate,
             polarity=0,
             phase=0
         )
@@ -220,8 +231,12 @@ class SDCard:
 
         return False
 
-    def _wait_until_ready(self, timeout=1000):
-        for _ in range(timeout):
+    def _wait_until_ready(self, timeout_ms=500):
+        # limit czasowy, nie liczba iteracji - przy szybszym SPI
+        # 1000 odczytow mija szybciej niz karta konczy zapis
+        start = ticks_ms()
+
+        while ticks_diff(ticks_ms(), start) < timeout_ms:
             if self.spi.read(
                     1,
                     0xFF
@@ -229,7 +244,7 @@ class SDCard:
                 return True
 
         raise OSError(
-            "SD write timeout"
+            "SD busy timeout"
         )
 
     def readblocks(
@@ -313,6 +328,9 @@ class SDCard:
             12,
             0
         )
+
+        # po CMD12 karta jest zajeta - poczekaj, zanim puscisz CS
+        self._wait_until_ready()
 
         self._end_command()
 
@@ -416,6 +434,10 @@ class SDCard:
         self.spi.write(
             bytes([0xFD])
         )
+
+        # stop token -> karta zapisuje, trzeba poczekac
+        self.spi.read(1, 0xFF)
+        self._wait_until_ready()
 
         self._end_command()
 

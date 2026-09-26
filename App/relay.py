@@ -39,3 +39,12 @@ class Relay:
 
     def get_state(self):
         return self._state
+
+    def refresh(self):
+        """
+        Wymusza na pinie stan logiczny. Zwraca True, jesli pin mial
+        inny poziom (widzimy tylko pin ESP, nie styk przekaznika).
+        """
+        wrong = self._pin.value() != self._state
+        self._pin.value(self._state)
+        return wrong

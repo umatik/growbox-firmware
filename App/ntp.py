@@ -35,7 +35,30 @@ def polish_utc_offset(year, month, day):
     return 1
 
 
+# Co ile ponawiac synchronizacje (s): po sukcesie rzadko,
+# po porazce czesciej - bez czasu tryb auto nie przelacza.
+NTP_RESYNC_OK = 6 * 3600
+NTP_RESYNC_FAIL = 120
+
+_synced_once = False
+
+
+async def ntp_task():
+    """Okresowa resynchronizacja (dryf zegara, zmiana czasu letni/zimowy)."""
+    while True:
+        await asyncio.sleep(
+            NTP_RESYNC_OK if _synced_once else NTP_RESYNC_FAIL
+        )
+
+        try:
+            await sync_ntp()
+        except Exception as e:
+            print("NTP task error:", e)
+
+
 async def sync_ntp():
+    global _synced_once
+
     await asyncio.sleep(2)
 
     ntptime.host = "pool.ntp.org"
@@ -50,6 +73,7 @@ async def sync_ntp():
             display.text("NTP synced", 0, 0, clear=True)
 
             synced = True
+            _synced_once = True
 
             t = utime.localtime()
 
