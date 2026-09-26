@@ -36,6 +36,10 @@ def _on_fan_change(state):
     config["relayFan"]["state"] = state
     config_store.save(config)
 
+    # z postoju wentylator nie rusza na niskim poziomie - krotki rozruch
+    if state:
+        _dimmer.kick()
+
     # przelaczenie wentylatora potrafi zaklocic przekaznik swiatla
     try:
         asyncio.create_task(_verify_light_after_fan())
@@ -62,7 +66,10 @@ _dimmer = dimmer.Dimmer(
     enabled=config.get("dimmer", {}).get("enabled", True),
     level=config.get("dimmer", {}).get("day", {}).get("level", 60),
     freq=esp_config.DIMMER_DEFAULTS["freq"],
-    max_level=esp_config.DIMMER_DEFAULTS["max_level"],
+    min_pct=esp_config.DIMMER_DEFAULTS["min_pct"],
+    max_pct=esp_config.DIMMER_DEFAULTS["max_pct"],
+    kick_pct=esp_config.DIMMER_DEFAULTS["kick_pct"],
+    kick_ms=esp_config.DIMMER_DEFAULTS["kick_ms"],
 )
 
 
@@ -323,10 +330,43 @@ async def _send_environment_json(writer, cors, query):
 
 # --- HTTP Server ---
 
+async def _read_request(reader):
+    """
+    Czyta naglowki i cale body wg Content-Length. Klient moze wyslac
+    body osobnym pakietem - jednorazowy read() gubil wtedy dane z POST-a.
+    """
+    data = await asyncio.wait_for(reader.read(2048), _IO_TIMEOUT)
+
+    head_end = data.find(b"\r\n\r\n")
+
+    if head_end != -1:
+        length = 0
+
+        for line in data[:head_end].split(b"\r\n")[1:]:
+            if line.lower().startswith(b"content-length:"):
+                try:
+                    length = int(line[15:].strip())
+                except ValueError:
+                    pass
+
+        # limit, zeby nie zjesc RAM-u
+        length = min(length, 4096)
+
+        while len(data) - (head_end + 4) < length:
+            more = await asyncio.wait_for(reader.read(1024), _IO_TIMEOUT)
+
+            if not more:
+                break
+
+            data += more
+
+    return data.decode()
+
+
+
 async def handle_request(reader, writer):
     try:
-        request = await asyncio.wait_for(reader.read(2048), _IO_TIMEOUT)
-        request = request.decode()
+        request = await _read_request(reader)
 
         lines = request.split("\r\n")
         first_line = lines[0].split(" ")
@@ -545,6 +585,35 @@ async def handle_request(reader, writer):
                         + cors +
                         "\r\n"
                         "OK"
+                ).encode()
+            )
+
+            await _drain(writer)
+            return
+
+        # POST /api/debug/dimmer  {"duty": 0..1023, "freq": Hz}  (kalibracja)
+
+        if method == "POST" and route == "/api/debug/dimmer":
+            body_start = request.find("\r\n\r\n")
+            body = json.loads(request[body_start + 4:] or "{}")
+
+            duty, freq = _dimmer.set_raw(
+                duty=body.get("duty"),
+                freq=body.get("freq"),
+            )
+
+            print("DIMMER RAW: duty", duty, "freq", freq)
+
+            body = json.dumps({"duty": duty, "freq": freq})
+
+            writer.write(
+                (
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: application/json\r\n"
+                        "Connection: close\r\n"
+                        + cors +
+                        "\r\n"
+                        + body
                 ).encode()
             )
 

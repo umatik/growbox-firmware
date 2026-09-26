@@ -31,6 +31,13 @@ DIMMER_DEFAULTS = {
     "enabled": True,
     "day_level": 60,
     "night_level": 30,
-    "max_level": 78,
-    "freq": 200,
+    # Kalibracja (2026-09-26, wentylator na obecnym module):
+    # przy 1 kHz: <=30% stoi, ~32% trzyma obroty, ~35% rusza z postoju,
+    # 75% = full, >=80% niestabilnie (rozpedza sie i hamuje).
+    # 200 Hz i 5 kHz dawaly mniej stabilne obroty.
+    "freq": 1000,
+    "min_pct": 33,   # poziom 0 w aplikacji
+    "max_pct": 75,   # poziom 100 w aplikacji
+    "kick_pct": 75,  # rozruch po wlaczeniu wentylatora
+    "kick_ms": 2000,
 }

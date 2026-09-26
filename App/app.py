@@ -101,6 +101,10 @@ async def supervise(name, factory):
 
 
 async def run_tasks():
+    # wentylator wlaczony od startu (stan z config.json) - rozruch dimmera
+    if server.fan_relay.get_state():
+        server._dimmer.kick()
+
     tasks = [
         # najwazniejsze najpierw: harmonogram i watchdog
         supervise("scheduler", clock_scheduler),
@@ -145,7 +149,7 @@ async def boot():
     await connect_wifi()
     await sync_ntp()
 
-    sd_logger.init(5)
+    sd_logger.init(120)
 
 
 def main():
