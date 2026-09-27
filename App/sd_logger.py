@@ -470,6 +470,12 @@ async def _send_rows(path, offset, before, since, ctx, send):
         f.close()
 
 
+# Max wierszy na odpowiedz (~0,6 s strumienia). Requesty ida po kolei
+# (server._request_lock), a przy 500 wierszach (~3 s) w kolejce zbieralo
+# sie tyle polaczen, ze sterta ESP-IDF sie wyczerpywala. Klient stronicuje
+# dalej po has_more / next_before / next_since.
+MAX_ROWS = 100
+
 _ROW_JSON = (
     '{"datetime":"%s","day_night":"%s",'
     '"temperature":%s,"humidity":%s}'
@@ -546,7 +552,7 @@ async def _segments_since(since):
     return ((_LOG_FILE, log_start or 0),)
 
 
-async def stream_environment_json(send, limit=500, before=None, since=None):
+async def stream_environment_json(send, limit=MAX_ROWS, before=None, since=None):
     """
     Wysyla przez async `send(bytes)` JSON
     {"status", "data": [...], "has_more", "next_before", "next_since"}
@@ -566,9 +572,9 @@ async def stream_environment_json(send, limit=500, before=None, since=None):
     try:
         limit = int(limit)
     except ValueError:
-        limit = 500
+        limit = MAX_ROWS
 
-    limit = max(1, min(500, limit))
+    limit = max(1, min(MAX_ROWS, limit))
 
     before = _parse_key(before)
     since = _parse_key(since)

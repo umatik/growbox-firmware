@@ -325,7 +325,7 @@ async def _send_environment_json(writer, cors, query):
 
     await sd_logger.stream_environment_json(
         send,
-        limit=query.get("limit", "500"),
+        limit=query.get("limit", str(sd_logger.MAX_ROWS)),
         before=query.get("before"),
         since=query.get("since"),
     )
@@ -474,7 +474,7 @@ async def _handle_ota(method, route, request, body, reader, writer, cors):
 
 
 
-async def handle_request(reader, writer):
+async def _handle_request(reader, writer):
     try:
         # upload = poczatek body PUT-a (OTA), dla reszty pusty
         request, upload = await _read_request(reader)
@@ -1104,6 +1104,44 @@ async def handle_request(reader, writer):
     finally:
         writer.close()
         await writer.wait_closed()
+
+
+# Requesty obslugiwane po kolei. Kilka naraz (np. strumien historii
+# i szybkie przelaczanie przekaznikow z aplikacji) potrafilo przekroczyc
+# sterte GC nawet po odsmiecaniu - MicroPython dokladal wtedy ~25 KB
+# ze sterty ESP-IDF i WiFi/lwIP zostawaly bez buforow (serwer wisial
+# do odlaczenia zasilania). Kolejne polaczenia czekaja na swoja kolej.
+# Rownolegle nawet 1 request sterujacy + 1 strumien historii przepelnial
+# sterte (sprawdzone) - dlatego calkiem po kolei; zeby przelaczanie nie
+# czekalo dlugo, aplikacja pobiera historie malymi stronami.
+_request_lock = asyncio.Lock()
+
+# ile polaczen moze czekac; kolejne sa od razu zamykane
+_MAX_WAITING = 6
+
+_waiting = 0
+
+
+async def handle_request(reader, writer):
+    global _waiting
+
+    if _waiting >= _MAX_WAITING:
+        print("HTTP: busy, connection dropped")
+        writer.close()
+        await writer.wait_closed()
+        return
+
+    _waiting += 1
+
+    try:
+        await _request_lock.acquire()
+    finally:
+        _waiting -= 1
+
+    try:
+        await _handle_request(reader, writer)
+    finally:
+        _request_lock.release()
 
 
 # --- Display ---

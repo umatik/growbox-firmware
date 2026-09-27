@@ -38,6 +38,13 @@ SCHEDULER_MAX_AGE_MS = 120000
 MAX_LOOP_CRASHES = 3
 LOOP_CRASH_WINDOW_MS = 10 * 60 * 1000
 
+# Siatka bezpieczenstwa: gdy sterta GC urosnie kosztem sterty ESP-IDF,
+# pamiec juz nie wraca - WiFi/lwIP nie maja buforow i serwer wisi, a WDT
+# tego nie widzi (harmonogram dziala). Tyle kontroli (co 5 s) ponizej
+# progu = reset.
+IDF_MIN_FREE = 8000
+IDF_LOW_CHECKS = 3
+
 _wdt = None
 
 
@@ -62,8 +69,23 @@ async def watchdog_task():
         print("WDT: enabled,", WDT_TIMEOUT_MS, "ms")
 
     warned = False
+    idf_low = 0
 
     while True:
+        idf_free = sd_logger.mem_info()[1]
+
+        # -1 = nie udalo sie odczytac, to nie powod do resetu
+        if 0 <= idf_free < IDF_MIN_FREE:
+            idf_low += 1
+            print("MEM: ESP-IDF heap low:", idf_free, "B")
+        else:
+            idf_low = 0
+
+        if idf_low >= IDF_LOW_CHECKS:
+            print("MEM: ESP-IDF heap exhausted -> machine.reset()")
+            utime.sleep_ms(500)
+            machine.reset()
+
         if scheduler_age_ms() < SCHEDULER_MAX_AGE_MS:
             _wdt.feed()
             warned = False
