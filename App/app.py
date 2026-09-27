@@ -6,6 +6,7 @@ import uasyncio as asyncio
 import utime
 
 import button
+import config_store
 import display
 import esp_config
 import ota
@@ -49,9 +50,16 @@ _wdt = None
 
 
 def toggle_lcd():
-    display.toggle(
-        not display.is_enabled()
-    )
+    enabled = not display.is_enabled()
+
+    display.toggle(enabled)
+
+    # config.json to stan, ktory widzi aplikacja - bez zapisu przycisk
+    # wylaczal LCD, a przelacznik w aplikacji dalej pokazywal ON
+    server.config["display"]["enabled"] = enabled
+    config_store.save(server.config)
+
+    print("Display (button):", "ON" if enabled else "OFF")
 
 
 lcd_button = button.Button(
@@ -182,6 +190,11 @@ async def boot():
     await sync_ntp()
 
     sd_logger.init(300)
+
+    # po komunikatach startowych LCD wg config.json (init() zawsze wlacza)
+    display.toggle(
+        bool(server.config["display"]["enabled"])
+    )
 
 
 def main():
