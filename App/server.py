@@ -1,5 +1,6 @@
 import json
 
+import machine
 import uasyncio as asyncio
 import utime
 
@@ -7,6 +8,7 @@ import config_store
 import dimmer
 import display
 import esp_config
+import ota
 import relay
 import sd_logger
 import sensor
@@ -325,6 +327,7 @@ async def _send_environment_json(writer, cors, query):
         send,
         limit=query.get("limit", "500"),
         before=query.get("before"),
+        since=query.get("since"),
     )
 
 
@@ -340,6 +343,10 @@ async def _read_request(reader):
     head_end = data.find(b"\r\n\r\n")
 
     if head_end != -1:
+        # upload pliku (OTA): body czyta ota.receive strumieniowo, bez RAM-u
+        if data.startswith(b"PUT "):
+            return data[:head_end].decode(), data[head_end + 4:]
+
         length = 0
 
         for line in data[:head_end].split(b"\r\n")[1:]:
@@ -360,13 +367,117 @@ async def _read_request(reader):
 
             data += more
 
-    return data.decode()
+    return data.decode(), b""
+
+
+def _header(request, name):
+    """Wartosc naglowka (name malymi literami) albo None."""
+    prefix = name + ":"
+
+    for line in request.split("\r\n")[1:]:
+        if line.lower().startswith(prefix):
+            return line[len(prefix):].strip()
+
+    return None
+
+
+async def _send_json(writer, cors, status_line, data):
+    body = json.dumps(data)
+
+    writer.write(
+        (
+            "HTTP/1.1 " + status_line + "\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: {}\r\n"
+            "Connection: close\r\n"
+            "{}"
+            "\r\n"
+            "{}"
+        ).format(len(body.encode()), cors, body).encode()
+    )
+
+    await _drain(writer)
+
+
+async def _reset_soon():
+    # chwila na zamkniecie polaczenia, zanim plytka zniknie
+    await asyncio.sleep(1)
+    machine.reset()
+
+
+async def _handle_ota(method, route, request, body, reader, writer, cors):
+    """Trasy OTA; zwraca False, gdy route nie jest trasa OTA."""
+
+    # GET /api/update  (stan, pliki z sha256, pliki czekajace na apply)
+
+    if method == "GET" and route == "/api/update":
+        await _send_json(writer, cors, "200 OK", ota.status())
+        return True
+
+    # PUT /api/files/<plik>?sha256=<hex>
+
+    if method == "PUT" and route.startswith("/api/files/"):
+        name = route[len("/api/files/"):]
+
+        try:
+            length = int(_header(request, "content-length") or "0")
+            query = _parse_query(request.split("\r\n", 1)[0].split(" ")[1])
+            digest = await ota.receive(
+                name, reader, length, body, query.get("sha256")
+            )
+        except ota.OtaError as e:
+            await _send_json(
+                writer, cors, "400 Bad Request",
+                {"status": "error", "error": str(e)}
+            )
+            return True
+
+        print("OTA: staged", name, length, "B")
+
+        await _send_json(
+            writer, cors, "200 OK",
+            {"status": "staged", "name": name, "sha256": digest}
+        )
+        return True
+
+    # POST /api/update/apply  (podmiana plikow i reset)
+
+    if method == "POST" and route == "/api/update/apply":
+        try:
+            files = ota.apply()
+        except ota.OtaError as e:
+            await _send_json(
+                writer, cors, "400 Bad Request",
+                {"status": "error", "error": str(e)}
+            )
+            return True
+
+        print("OTA: applied", files, "-> reset")
+
+        await _send_json(
+            writer, cors, "200 OK",
+            {"status": "applied", "files": files}
+        )
+        asyncio.create_task(_reset_soon())
+        return True
+
+    # POST /api/update/discard  (usun pliki .new po przerwanym uploadzie)
+
+    if method == "POST" and route == "/api/update/discard":
+        await _send_json(
+            writer, cors, "200 OK",
+            {"status": "discarded", "files": ota.discard()}
+        )
+        return True
+
+    return False
 
 
 
 async def handle_request(reader, writer):
     try:
-        request = await _read_request(reader)
+        # upload = poczatek body PUT-a (OTA), dla reszty pusty
+        request, upload = await _read_request(reader)
 
         lines = request.split("\r\n")
         first_line = lines[0].split(" ")
@@ -387,7 +498,7 @@ async def handle_request(reader, writer):
         cors = (
             "Access-Control-Allow-Origin: *\r\n"
             "Access-Control-Allow-Methods: "
-            "GET, POST, OPTIONS\r\n"
+            "GET, POST, PUT, OPTIONS\r\n"
             "Access-Control-Allow-Headers: "
             "Content-Type, Authorization\r\n"
         )
@@ -422,6 +533,11 @@ async def handle_request(reader, writer):
             )
 
             await _drain(writer)
+            return
+
+        if await _handle_ota(
+                method, route, request, upload, reader, writer, cors
+        ):
             return
 
         # GET /api/config
@@ -921,6 +1037,7 @@ async def handle_request(reader, writer):
             return
 
         # GET /api/environment?limit=500&before=YYYY-MM-DD HH:MM:SS
+        # GET /api/environment?limit=500&since=YYYY-MM-DD HH:MM:SS
 
         if method == "GET" and route == "/api/environment":
             await _send_environment_json(

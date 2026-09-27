@@ -234,7 +234,7 @@ def _parse_row(line):
     )
 
 
-def _qualifies(line, before):
+def _qualifies(line, before, since=None):
     """Wiersz danych pasujacy do zapytania -> sparsowana krotka, inaczej None."""
     if len(line) < 19:
         return None
@@ -243,12 +243,87 @@ def _qualifies(line, before):
     if before is not None and line[:19] >= before:
         return None
 
+    if since is not None and line[:19] <= since:
+        return None
+
     return _parse_row(line)
 
 
-async def _find_start(path, state, limit, before):
+def _is_data(line):
+    # wiersz danych zaczyna sie od roku ("2026-..."), naglowek od "datetime"
+    return len(line) >= 19 and 48 <= line[0] <= 57
+
+
+async def _bisect(path, key, strict):
     """
-    Przebieg 1: czyta plik OD KONCA i tylko LICZY pasujace wiersze
+    Log jest tylko dopisywany, wiec wiersze sa posortowane po czasie.
+    Szuka binarnie offsetu pierwszego wiersza z datetime > key (strict)
+    albo >= key. Zwraca rozmiar pliku, gdy takiego wiersza nie ma,
+    None gdy pliku nie ma. Kilkanascie odczytow zamiast skanu calego pliku.
+    """
+    try:
+        f = open(path, "rb")
+    except OSError as e:
+        if e.args and e.args[0] == 2:  # ENOENT
+            return None
+        raise
+
+    def matches(line):
+        return line[:19] > key if strict else line[:19] >= key
+
+    try:
+        f.seek(0, 2)
+        size = f.tell()
+
+        # pomin naglowek
+        f.seek(0)
+        f.readline()
+        lo = f.tell()
+        hi = size
+
+        # niezmiennik: szukany wiersz zaczyna sie w [lo, hi]
+        while hi - lo > _READ_BLOCK:
+            mid = (lo + hi) // 2
+            f.seek(mid)
+            f.readline()  # urwana linia
+            start = f.tell()
+
+            if start >= hi:
+                break
+
+            line = f.readline()
+
+            if _is_data(line) and matches(line):
+                hi = start
+            else:
+                lo = start + len(line)
+
+            await asyncio.sleep(0)
+
+        # koncowka liniowo
+        f.seek(lo)
+        pos = lo
+
+        while pos < hi:
+            line = f.readline()
+
+            if not line:
+                break
+
+            if _is_data(line) and matches(line):
+                return pos
+
+            pos += len(line)
+
+        return hi
+
+    finally:
+        f.close()
+
+
+async def _find_start(path, state, limit, before, end=None):
+    """
+    Przebieg 1: czyta plik OD KONCA (albo od offsetu `end`) i tylko LICZY pasujace wiersze
     (nic nie trzyma w RAM-ie). `state` = [found, path, offset, datetime]
     najstarszego wiersza do wyslania. Zwraca True, gdy trzeba czytac
     dalej (starszy plik), False gdy znaleziono limit + 1 wierszy.
@@ -272,8 +347,12 @@ async def _find_start(path, state, limit, before):
         return state[0] > limit
 
     try:
-        f.seek(0, 2)
-        pos = f.tell()
+        if end is None:
+            f.seek(0, 2)
+            pos = f.tell()
+        else:
+            pos = end
+
         rest = b""
         blocks = 0
 
@@ -320,22 +399,41 @@ class _SdError(Exception):
     pass
 
 
-async def _send_rows(path, offset, before, left, send, first):
+async def _send_rows(path, offset, before, since, ctx, send):
     """
     Przebieg 2: czyta plik od `offset` DO PRZODU i wysyla pasujace
-    wiersze jako JSON, kawalek po kawalku. Zwraca (ile zostalo, first).
+    wiersze jako JSON, kawalek po kawalku. `ctx` = [ile zostalo, first,
+    datetime ostatniego wyslanego]. Zwraca True, gdy po wyczerpaniu
+    limitu trafil sie jeszcze pasujacy wiersz (czyli jest cos dalej).
     Bledy karty -> _SdError; bledy socketu leca wyzej bez zmian.
     """
     try:
         f = open(path, "rb")
         f.seek(offset)
+    except OSError as e:
+        if e.args and e.args[0] == 2:  # ENOENT
+            return False
+        raise _SdError(e)
     except Exception as e:
         raise _SdError(e)
+
+    async def flush(part):
+        if not part:
+            return
+
+        chunk = ",".join(part)
+
+        if not ctx[1]:
+            chunk = "," + chunk
+
+        ctx[1] = False
+
+        await send(chunk.encode())
 
     try:
         rest = b""
 
-        while left > 0:
+        while True:
             try:
                 block = f.read(_READ_BLOCK)
             except Exception as e:
@@ -350,31 +448,23 @@ async def _send_rows(path, offset, before, left, send, first):
             part = []
 
             for line in lines:
-                row = _qualifies(line, before)
+                row = _qualifies(line, before, since)
 
                 if row is None:
                     continue
 
+                if ctx[0] <= 0:
+                    await flush(part)
+                    return True
+
                 part.append(_ROW_JSON % row)
-                left -= 1
+                ctx[0] -= 1
+                ctx[2] = row[0]
 
-                if left == 0:
-                    break
-
-            if part:
-                chunk = ",".join(part)
-
-                if not first:
-                    chunk = "," + chunk
-
-                first = False
-
-                await send(chunk.encode())
+            await flush(part)
 
             if not block:
-                break
-
-        return left, first
+                return False
 
     finally:
         f.close()
@@ -385,25 +475,88 @@ _ROW_JSON = (
     '"temperature":%s,"humidity":%s}'
 )
 
+_JSON_HEAD = b'{"status":"ok","data":['
 
-def _json_head(status, has_more, next_before):
+
+def _json_tail(has_more, next_before, next_since):
+    # metadane na koncu: has_more wychodzi dopiero po przeczytaniu wierszy
     return (
-        '{"status":%s,"has_more":%s,"next_before":%s,"data":['
+        '],"has_more":%s,"next_before":%s,"next_since":%s}'
         % (
-            json.dumps(status),
             "true" if has_more else "false",
             json.dumps(next_before),
+            json.dumps(next_since),
         )
     ).encode()
 
 
-async def stream_environment_json(send, limit=500, before=None):
+def _json_offline():
+    return b'{"status":"offline","data":[' + _json_tail(False, None, None)
+
+
+def _parse_key(value):
+    """'YYYY-MM-DD HH:MM:SS' -> bytes, cokolwiek innego -> None."""
+    if not value or len(value) != 19:
+        return None
+
+    return value.encode()
+
+
+async def _segments_before(limit, before, state):
+    """Tryb `before`: najnowsze `limit` wierszy starszych niz `before`."""
+    log_end = await _bisect(_LOG_FILE, before, False) if before else None
+
+    if await _find_start(_LOG_FILE, state, limit, before, log_end):
+        arch_end = (
+            await _bisect(_ARCHIVE_FILE, before, False) if before else None
+        )
+        await _find_start(_ARCHIVE_FILE, state, limit, before, arch_end)
+
+    start_path, start_offset = state[1], state[2]
+
+    if start_path == _ARCHIVE_FILE:
+        return ((_ARCHIVE_FILE, start_offset), (_LOG_FILE, 0))
+
+    if start_path == _LOG_FILE:
+        return ((_LOG_FILE, start_offset),)
+
+    return ()
+
+
+async def _segments_since(since):
+    """Tryb `since`: wiersze nowsze niz `since`, od najstarszego."""
+    log_start = await _bisect(_LOG_FILE, since, True)
+
+    # czy biezacy log ma jakis wiersz <= since? jesli nie, zacznij w archiwum
+    try:
+        f = open(_LOG_FILE, "rb")
+        try:
+            header = len(f.readline())
+        finally:
+            f.close()
+    except OSError:
+        header = 0
+
+    if log_start is None or log_start <= header:
+        arch_start = await _bisect(_ARCHIVE_FILE, since, True)
+
+        if arch_start is not None:
+            return ((_ARCHIVE_FILE, arch_start), (_LOG_FILE, 0))
+
+    return ((_LOG_FILE, log_start or 0),)
+
+
+async def stream_environment_json(send, limit=500, before=None, since=None):
     """
     Wysyla przez async `send(bytes)` JSON
-    {"status", "has_more", "next_before", "data": [...]}
-    z najnowszymi `limit` pomiarami starszymi niz `before`,
-    od najstarszego do najnowszego.
+    {"status", "data": [...], "has_more", "next_before", "next_since"}
+    od najstarszego do najnowszego:
+    - bez `since`: najnowsze `limit` pomiarow starszych niz `before`
+      (strona wstecz: kolejne zapytanie z before=next_before),
+    - z `since`: najstarsze `limit` pomiarow nowszych niz `since`
+      (synchronizacja przyrostowa: kolejne zapytanie z since=next_since).
 
+    Poczatek szuka binarnie, wiec koszt nie rosnie z rozmiarem loga.
     Nie buduje listy wierszy w RAM-ie: duza lista rozpycha sterte GC
     kosztem sterty ESP-IDF, a wtedy WiFi/lwIP nie ma buforow
     i odpowiedzi HTTP staja.
@@ -417,15 +570,19 @@ async def stream_environment_json(send, limit=500, before=None):
 
     limit = max(1, min(500, limit))
 
-    before = before.encode() if before else None
+    before = _parse_key(before)
+    since = _parse_key(since)
 
     if not _enabled:
         print("ENV: SD offline")
-        await send(_json_head("offline", False, None) + b"]}")
+        await send(_json_offline())
         return
 
     t0 = utime.ticks_ms()
-    print("ENV: read start, limit", limit, "before", before, "mem", mem_info())
+    print(
+        "ENV: read start, limit", limit, "before", before, "since", since,
+        "mem", mem_info()
+    )
 
     _readers += 1
 
@@ -434,40 +591,32 @@ async def stream_environment_json(send, limit=500, before=None):
         state = [0, None, 0, None]
 
         try:
-            if await _find_start(_LOG_FILE, state, limit, before):
-                await _find_start(_ARCHIVE_FILE, state, limit, before)
+            if since is not None:
+                segments = await _segments_since(since)
+            else:
+                segments = await _segments_before(limit, before, state)
         except Exception as e:
             print("ENV: SD error:", repr(e))
             _handle_error(e)
-            await send(_json_head("offline", False, None) + b"]}")
+            await send(_json_offline())
             return
 
-        found, start_path, start_offset, start_dt = state
-
-        has_more = found > limit
-        count = limit if has_more else found
-        left = count
-
-        await send(_json_head("ok", has_more, start_dt if has_more else None))
+        await send(_JSON_HEAD)
 
         # przebieg 2: wyslij od najstarszego
-        if start_path == _ARCHIVE_FILE:
-            segments = ((_ARCHIVE_FILE, start_offset), (_LOG_FILE, 0))
-        elif start_path == _LOG_FILE:
-            segments = ((_LOG_FILE, start_offset),)
+        if since is not None:
+            count = limit
         else:
-            segments = ()
+            count = min(state[0], limit)
 
-        first = True
+        ctx = [count, True, None]
+        more = False
 
         for path, offset in segments:
-            if left <= 0:
-                break
-
             try:
-                left, first = await _send_rows(
-                    path, offset, before, left, send, first
-                )
+                if await _send_rows(path, offset, before, since, ctx, send):
+                    more = True
+                    break
             except _SdError as e:
                 # odpowiedz zostaje urwana - klient dostanie niepelny JSON
                 err = e.args[0] if e.args else e
@@ -475,11 +624,15 @@ async def stream_environment_json(send, limit=500, before=None):
                 _handle_error(err)
                 return
 
-        await send(b"]}")
+        if since is not None:
+            await send(_json_tail(more, None, ctx[2] if more else None))
+        else:
+            has_more = state[0] > limit
+            await send(_json_tail(has_more, state[3] if has_more else None, None))
 
         print(
             "ENV: sent",
-            count - left,
+            count - ctx[0],
             "rows in",
             utime.ticks_diff(utime.ticks_ms(), t0),
             "ms, mem",
@@ -593,9 +746,12 @@ async def task():
                 temperature = data.get("temperature")
                 humidity = data.get("humidity")
 
+                # rok < 2025 = zegar po restarcie bez NTP; taki wiersz
+                # zepsulby kolejnosc loga (wyszukiwanie binarne, since)
                 if (
                         temperature is not None
                         and humidity is not None
+                        and now[0] >= 2025
                 ):
                     day_night = (
                         "DAY"

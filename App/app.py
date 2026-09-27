@@ -8,6 +8,7 @@ import utime
 import button
 import display
 import esp_config
+import ota
 import sd_logger
 import sensor
 import server
@@ -100,6 +101,14 @@ async def supervise(name, factory):
         delay = min(delay * 2, 60)
 
 
+async def ota_confirm_task():
+    # bez supervise: po potwierdzeniu zadanie ma sie po prostu skonczyc
+    try:
+        await ota.confirm_task(lambda: server._server is not None)
+    except Exception as e:
+        print("OTA: confirm error:", repr(e))
+
+
 async def run_tasks():
     # wentylator wlaczony od startu (stan z config.json) - rozruch dimmera
     if server.fan_relay.get_state():
@@ -121,6 +130,7 @@ async def run_tasks():
         supervise("display", display.display_updater),
         supervise("sensor", sensor.sensor_task),
         supervise("logger", sd_logger.task),
+        ota_confirm_task(),
     )
 
 
@@ -149,7 +159,7 @@ async def boot():
     await connect_wifi()
     await sync_ntp()
 
-    sd_logger.init(120)
+    sd_logger.init(300)
 
 
 def main():
