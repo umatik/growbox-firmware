@@ -9,6 +9,7 @@ import dimmer
 import display
 import esp_config
 import events
+import fan_auto
 import ota
 import relay
 import sd_logger
@@ -17,6 +18,9 @@ import sensor
 API_TOKEN = "hftqpPVbeLwaqPDfJ25eCzxRETqsoX8sh1K56NRUp2zW8GxHr1M6u5s4fEMv"
 
 config = config_store.load()
+
+# ile ostatnich podlan trzymac w config.json (idzie w kazdym /api/config)
+_FEEDING_HISTORY = 30
 
 DEFAULT_LIGHT_SCHEDULE = [
     {
@@ -190,6 +194,16 @@ def apply_auto_logic():
             )
 
 
+# --- Fan auto (MANUAL / vege) - logika w fan_auto.py ---
+
+def fan_auto_enabled():
+    return fan_auto.enabled(config)
+
+
+def apply_fan_auto(force=False):
+    fan_auto.apply(config, light_relay.get_state(), _dimmer, force)
+
+
 # Ostatni obieg harmonogramu - watchdog karmi ESP tylko, gdy to jest swieze.
 _scheduler_tick = utime.ticks_ms()
 
@@ -214,6 +228,11 @@ async def clock_scheduler():
                 apply_auto_logic()
         except Exception as e:
             print("SCHED: auto error:", repr(e))
+
+        try:
+            apply_fan_auto()
+        except Exception as e:
+            print("SCHED: fan auto error:", repr(e))
 
         try:
             _refresh_relays()
@@ -611,6 +630,7 @@ async def _handle_request(reader, writer):
                         if light_relay.get_state()
                         else "OFF"
                     ),
+                    "fanLevel": _dimmer.get_level(),
                 }
             })
 
@@ -689,6 +709,8 @@ async def _handle_request(reader, writer):
 
             if enabled:
                 apply_auto_logic()
+            elif fan_auto_enabled():
+                apply_fan_auto(force=True)
             else:
                 if config.get(
                         "auto",
@@ -811,7 +833,7 @@ async def _handle_request(reader, writer):
                 ):
                     if _should_light_be_on():
                         _dimmer.set_level(level)
-                else:
+                elif not fan_auto_enabled():
                     _dimmer.set_level(level)
 
             writer.write(
@@ -912,6 +934,42 @@ async def _handle_request(reader, writer):
                 ).encode()
             )
 
+            await _drain(writer)
+            return
+
+        # POST /api/feeding  {"date": ISO}  (podlanie z aplikacji)
+
+        if method == "POST" and path == "/api/feeding":
+            date = json.loads(request[request.find("\r\n\r\n") + 4:])["date"]
+
+            if not isinstance(date, str) or len(date) > 40:
+                raise ValueError("Invalid feeding date")
+
+            feeding = config["feeding"]
+            feeding["lastFedAt"] = date
+            feeding["count"] += 1
+            # aplikacja liczy z historii rytm podlewania; ogon wystarczy
+            feeding["history"] = (feeding["history"] + [date])[-_FEEDING_HISTORY:]
+            config_store.save(config)
+
+            writer.write(("HTTP/1.1 200 OK\r\n" + cors + "\r\nOK").encode())
+            await _drain(writer)
+            return
+
+        # POST /api/fan/auto/toggle
+
+        if method == "POST" and path == "/api/fan/auto/toggle":
+            fa = config["fanAuto"]
+            fa["enabled"] = not fa["enabled"]
+            config_store.save(config)
+
+            if fan_auto_enabled():
+                apply_fan_auto(True)
+            elif not config["auto"]["enabled"]:
+                # wylaczony automat - wraca reczny poziom
+                _dimmer.set_level(config["dimmer"]["day"]["level"])
+
+            writer.write(("HTTP/1.1 200 OK\r\n" + cors + "\r\nOK").encode())
             await _drain(writer)
             return
 

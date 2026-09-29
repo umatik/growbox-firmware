@@ -25,6 +25,21 @@ DEFAULT_CONFIG = {
     },
     "display": {
         "enabled": False,
+    },
+    # MANUAL (vege): poziom wentylatora wg temperatury. Progi jak VEG_TARGETS
+    # w aplikacji - swiatlo ON 24-26 C, swiatlo OFF 20-22 C.
+    "fanAuto": {
+        "enabled": False,
+        "minLevel": 20,
+        "maxLevel": 100,
+        "day": {"min": 24, "max": 26},
+        "night": {"min": 20, "max": 22}
+    },
+    # podlewanie zapisywane z aplikacji (POST /api/feeding), daty ISO
+    "feeding": {
+        "lastFedAt": None,
+        "count": 0,
+        "history": []
     }
 }
 
