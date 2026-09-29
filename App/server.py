@@ -8,6 +8,7 @@ import config_store
 import dimmer
 import display
 import esp_config
+import events
 import ota
 import relay
 import sd_logger
@@ -292,9 +293,43 @@ def _parse_query(path):
 # socketow i serwer przestaje przyjmowac polaczenia.
 _IO_TIMEOUT = 15
 
+# Requesty ida po kolei (_request_lock), wiec klient, ktory przestal
+# wysylac/odbierac (telefon zgubil pakiet, przeszedl w tlo), blokowal
+# cala kolejke na _IO_TIMEOUT - reszta dostawala timeouty. Request
+# przychodzi zaraz po polaczeniu, porcja odpowiedzi to ulamek sekundy.
+_READ_TIMEOUT = 3
+_WRITE_TIMEOUT = 5
+
 
 async def _drain(writer):
-    await asyncio.wait_for(writer.drain(), _IO_TIMEOUT)
+    await asyncio.wait_for(writer.drain(), _WRITE_TIMEOUT)
+
+
+# diagnostyka dla GET /api/status; reset_cause ustawia app.boot()
+boot_info = {"reset_cause": None, "boot_ticks": utime.ticks_ms()}
+stats = {"requests": 0, "dropped": 0, "timeouts": 0, "errors": 0}
+
+
+def _wifi_rssi():
+    try:
+        import network
+        return network.WLAN(network.STA_IF).status("rssi")
+    except Exception:
+        return None
+
+
+def _status():
+    return {
+        "uptime_s": utime.ticks_diff(
+            utime.ticks_ms(), boot_info["boot_ticks"]
+        ) // 1000,
+        "reset_cause": boot_info["reset_cause"],
+        "mem": sd_logger.mem_info(),
+        "rssi": _wifi_rssi(),
+        "waiting": _waiting,
+        "stats": stats,
+        "events": events.tail(),
+    }
 
 
 # --- Environment JSON (streaming) ---
@@ -338,7 +373,7 @@ async def _read_request(reader):
     Czyta naglowki i cale body wg Content-Length. Klient moze wyslac
     body osobnym pakietem - jednorazowy read() gubil wtedy dane z POST-a.
     """
-    data = await asyncio.wait_for(reader.read(2048), _IO_TIMEOUT)
+    data = await asyncio.wait_for(reader.read(2048), _READ_TIMEOUT)
 
     head_end = data.find(b"\r\n\r\n")
 
@@ -360,7 +395,7 @@ async def _read_request(reader):
         length = min(length, 4096)
 
         while len(data) - (head_end + 4) < length:
-            more = await asyncio.wait_for(reader.read(1024), _IO_TIMEOUT)
+            more = await asyncio.wait_for(reader.read(1024), _READ_TIMEOUT)
 
             if not more:
                 break
@@ -533,6 +568,14 @@ async def _handle_request(reader, writer):
             )
 
             await _drain(writer)
+            return
+
+        stats["requests"] += 1
+
+        # GET /api/status  (diagnostyka: uptime, restarty, pamiec, liczniki)
+
+        if method == "GET" and route == "/api/status":
+            await _send_json(writer, cors, "200 OK", _status())
             return
 
         if await _handle_ota(
@@ -1096,6 +1139,11 @@ async def _handle_request(reader, writer):
         await _drain(writer)
 
     except Exception as e:
+        if isinstance(e, asyncio.TimeoutError):
+            stats["timeouts"] += 1
+        else:
+            stats["errors"] += 1
+
         print(
             "Request error:",
             repr(e)
@@ -1126,6 +1174,7 @@ async def handle_request(reader, writer):
     global _waiting
 
     if _waiting >= _MAX_WAITING:
+        stats["dropped"] += 1
         print("HTTP: busy, connection dropped")
         writer.close()
         await writer.wait_closed()

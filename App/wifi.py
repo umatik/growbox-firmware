@@ -2,6 +2,7 @@ import network
 import uasyncio as asyncio
 
 import display
+import events
 from secrets import SSID, PASSWORD
 
 wlan = None
@@ -82,6 +83,7 @@ async def wifi_watchdog():
     while True:
         if wlan is None or not wlan.isconnected():
             print("WiFi lost! Reconnecting...")
+            events.log("wifi lost")
             display.text("WiFi lost! ", 0, 0, clear=True)
             display.text("Reconnecting...", 0, 10, clear=False)
 
@@ -101,6 +103,7 @@ async def wifi_watchdog():
                         "WiFi restored:",
                         wlan.ifconfig()[0]
                     )
+                    events.log("wifi restored")
 
                 else:
                     failed_attempts += 1

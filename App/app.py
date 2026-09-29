@@ -9,6 +9,7 @@ import button
 import config_store
 import display
 import esp_config
+import events
 import ota
 import sd_logger
 import sensor
@@ -91,6 +92,7 @@ async def watchdog_task():
 
         if idf_low >= IDF_LOW_CHECKS:
             print("MEM: ESP-IDF heap exhausted -> machine.reset()")
+            events.log("reset: ESP-IDF heap exhausted")
             utime.sleep_ms(500)
             machine.reset()
 
@@ -178,6 +180,9 @@ async def boot():
     cause = machine.reset_cause()
     print("BOOT: reset cause", causes.get(cause, cause))
 
+    server.boot_info["reset_cause"] = causes.get(cause, str(cause))
+    events.log("boot, reset cause " + server.boot_info["reset_cause"])
+
     display.init()
 
     display.set_state_provider(
@@ -217,6 +222,7 @@ def main():
         except Exception as e:
             # awaria samej petli asyncio (np. OSError EIO w select)
             print("MAIN: event loop crashed:", repr(e))
+            events.log("event loop crashed: " + repr(e))
             sys.print_exception(e)
 
         now = utime.ticks_ms()
@@ -228,6 +234,7 @@ def main():
 
         if len(crashes) >= MAX_LOOP_CRASHES:
             print("MAIN: too many crashes -> machine.reset()")
+            events.log("reset: too many event loop crashes")
             utime.sleep_ms(500)
             machine.reset()
 
