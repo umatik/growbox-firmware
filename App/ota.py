@@ -102,21 +102,30 @@ def load_state():
         return None
 
 
-def status():
+async def status(names=None):
+    """
+    names: tylko te pliki (po aktualizacji wystarcza wyslane). Sumy
+    wszystkich plikow naraz wyczerpywaly sterte ESP-IDF (reset "heap
+    exhausted"), dlatego po kazdym pliku odsmiecanie i oddanie petli.
+    """
     gc.collect()
 
     files = []
     staged = []
 
     for name in sorted(os.listdir()):
-        if name.endswith(".py"):
+        if name.endswith(".py.new"):
+            staged.append(name[:-4])
+        elif name.endswith(".py") and (names is None or name in names):
+            await asyncio.sleep_ms(0)
             files.append({
                 "name": name,
                 "size": os.stat(name)[6],
                 "sha256": _sha256_file(name),
             })
-        elif name.endswith(".py.new"):
-            staged.append(name[:-4])
+            # obiekt sha256 (mbedtls) trzyma kontekst w stercie ESP-IDF az
+            # do odsmiecenia - kilkadziesiat plikow naraz ja wyczerpywalo
+            gc.collect()
 
     return {
         "state": load_state(),

@@ -32,7 +32,15 @@ DEFAULT_URL = "http://192.168.18.85"
 
 # nowa wersja potwierdza sie po 60 s pracy (ota.CONFIRM_AFTER_S)
 BOOT_TIMEOUT_S = 90
+CONFIRM_AFTER_S = 60
 CONFIRM_TIMEOUT_S = 150
+
+# Po restarcie ESP nie wolno go zasypywac: requesty ida po kolei, a
+# /api/update liczy sha256 wszystkich plikow. Gesty polling z krotkim
+# timeoutem pietrzyl polaczenia w lwIP -> sterta ESP-IDF sie konczyla,
+# ESP resetowal sie w kolko i wracal do starej wersji (rollback).
+POLL_INTERVAL_S = 10
+POLL_TIMEOUT_S = 20
 
 
 def read_token():
@@ -65,8 +73,31 @@ class Esp:
             body = e.read().decode(errors="replace")
             raise RuntimeError("%s %s -> HTTP %s %s" % (method, path, e.code, body))
 
-    def status(self, timeout=30):
-        return self.request("GET", "/api/update", timeout=timeout)
+    def status(self, timeout=30, names=None):
+        path = "/api/update"
+
+        # nowszy firmware liczy sumy tylko tych plikow, starszy ignoruje
+        if names:
+            path += "?files=" + urllib.parse.quote(",".join(names), safe=",")
+
+        return self.request("GET", path, timeout=timeout)
+
+    def status_batched(self, names, batch=5):
+        """
+        Sumy partiami - wszystkie pliki naraz wyczerpywaly sterte ESP-IDF.
+        Pliki tylko na ESP (bez lokalnej kopii) nie sa tu potrzebne.
+        """
+        result = None
+
+        for i in range(0, len(names), batch):
+            part = self.status(names=names[i:i + batch])
+
+            if result is None:
+                result = part
+            else:
+                result["files"] += part["files"]
+
+        return result
 
     def upload(self, name, content):
         sha = hashlib.sha256(content).hexdigest()
@@ -86,12 +117,12 @@ def local_files():
     return files
 
 
-def wait_for(esp, timeout, done, label):
+def wait_for(fetch, timeout, done, label):
     deadline = time.time() + timeout
 
     while time.time() < deadline:
         try:
-            status = esp.status(timeout=5)
+            status = fetch()
 
             if done(status):
                 return status
@@ -99,7 +130,7 @@ def wait_for(esp, timeout, done, label):
             pass  # ESP jeszcze wstaje
 
         print(".", end="", flush=True)
-        time.sleep(3)
+        time.sleep(POLL_INTERVAL_S)
 
     print()
     sys.exit("Timeout: %s" % label)
@@ -120,7 +151,7 @@ def main():
     print("ESP:", esp.url)
 
     try:
-        status = esp.status()
+        status = esp.status_batched(list(files) + list(PROTECTED))
     except (OSError, RuntimeError) as e:
         sys.exit("Brak polaczenia z ESP: %s" % e)
 
@@ -183,10 +214,29 @@ def main():
     if args.no_wait:
         return
 
-    time.sleep(3)
-    status = wait_for(esp, BOOT_TIMEOUT_S, lambda s: True, "ESP nie wstal")
+    time.sleep(POLL_INTERVAL_S)
+
+    # lekki /api/status - tylko czy wstal i od ilu sekund dziala
+    health = wait_for(
+        lambda: esp.request("GET", "/api/status", timeout=POLL_TIMEOUT_S),
+        BOOT_TIMEOUT_S, lambda s: True, "ESP nie wstal",
+    )
     print()
 
+    wait_s = CONFIRM_AFTER_S + 5 - health.get("uptime_s", 0)
+
+    if wait_s > 0:
+        print("ESP wstal, czekam %d s na potwierdzenie" % wait_s)
+        time.sleep(wait_s)
+
+    # pelny /api/update dopiero teraz, pojedynczo i z dlugim timeoutem
+    status = wait_for(
+        lambda: esp.status(timeout=60, names=changed),
+        CONFIRM_TIMEOUT_S, lambda s: not s.get("state"),
+        "nowa wersja sie nie potwierdzila",
+    )
+
+    # stan pusty jest tez po rollbacku - rozstrzygaja sumy plikow
     remote = {f["name"]: f["sha256"] for f in status["files"]}
     wrong = [
         name for name in changed
@@ -194,15 +244,10 @@ def main():
     ]
 
     if wrong:
-        sys.exit("ESP dziala, ale ma inne wersje plikow (rollback?): %s"
+        sys.exit("ESP wrocil do poprzedniej wersji (rollback): %s"
                  % ", ".join(wrong))
 
-    print("ESP wstal z nowymi plikami, czekam na potwierdzenie (~60 s)",
-          end="", flush=True)
-
-    wait_for(esp, CONFIRM_TIMEOUT_S, lambda s: not s.get("state"),
-             "nowa wersja sie nie potwierdzila")
-    print("\nGotowe - aktualizacja potwierdzona.")
+    print("Gotowe - aktualizacja potwierdzona.")
 
 
 if __name__ == "__main__":
