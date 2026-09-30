@@ -173,6 +173,15 @@ def apply_auto_logic():
         False
     )
 
+    # nightFan w nocy: wilgotnosc ponad sweet point podkreca obroty
+    humid_level = None
+
+    if not should_on and night_fan:
+        humid_level = fan_auto.night_humidity_level(
+            config,
+            config["dimmer"]["night"]["level"]
+        )
+
     if should_on or night_fan:
         fan_relay.on()
     else:
@@ -191,7 +200,7 @@ def apply_auto_logic():
             )
         else:
             _dimmer.set_level(
-                config["dimmer"]["night"]["level"]
+                humid_level or config["dimmer"]["night"]["level"]
             )
 
 
