@@ -6,6 +6,10 @@ Aktualizacja ESP przez WiFi (OTA, patrz App/ota.py).
     ./deploy.py --dry-run    # tylko pokaz, co sie zmienilo
     ./deploy.py sensor.py    # wyslij wybrane pliki (nawet bez zmian)
 
+Moduly ida jako prekompilowane .mpy (mpy-cross w wersji MicroPythona na
+ESP): ESP nie kompiluje zrodel przy starcie i zostaje mu wiecej RAM-u.
+    pipx install mpy-cross==1.27.0.post2
+
 Adres: --url albo zmienna ESP_URL (domyslnie http://192.168.18.85).
 Token: czytany z App/server.py (API_TOKEN).
 
@@ -18,7 +22,9 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -29,6 +35,11 @@ APP_DIR = os.path.join(ROOT, "App")
 
 PROTECTED = ("main.py", "boot.py", "secrets.py")
 DEFAULT_URL = "http://192.168.18.85"
+
+# format .mpy MicroPythona 1.27 na ESP32 (xtensawin)
+MPY_CROSS = "mpy-cross"
+MPY_VERSION = "mpy v6.3"
+MPY_ARCH = "xtensawin"
 
 # nowa wersja potwierdza sie po 60 s pracy (ota.CONFIRM_AFTER_S)
 BOOT_TIMEOUT_S = 90
@@ -106,13 +117,42 @@ class Esp:
         return self.request("PUT", path, content, timeout=60)
 
 
+def check_mpy_cross():
+    try:
+        version = subprocess.run(
+            [MPY_CROSS, "--version"], capture_output=True, text=True
+        ).stdout
+    except FileNotFoundError:
+        sys.exit("Brak mpy-cross: pipx install mpy-cross==1.27.0.post2")
+
+    if MPY_VERSION not in version:
+        sys.exit("mpy-cross emituje inny format niz %s: %s"
+                 % (MPY_VERSION, version.strip()))
+
+
 def local_files():
+    """{"X.mpy": bajty} - moduly z App/ skompilowane mpy-cross."""
     files = {}
 
-    for name in sorted(os.listdir(APP_DIR)):
-        if name.endswith(".py") and name not in PROTECTED:
-            with open(os.path.join(APP_DIR, name), "rb") as f:
-                files[name] = f.read()
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in sorted(os.listdir(APP_DIR)):
+            if not name.endswith(".py") or name in PROTECTED:
+                continue
+
+            out = os.path.join(tmp, name[:-3] + ".mpy")
+            # -s: w .mpy sama nazwa pliku, nie sciezka z tego komputera -
+            # te same bajty (i sumy) na kazdej maszynie
+            result = subprocess.run(
+                [MPY_CROSS, "-march=" + MPY_ARCH, "-s", name, "-o", out,
+                 os.path.join(APP_DIR, name)],
+                capture_output=True, text=True,
+            )
+
+            if result.returncode:
+                sys.exit("mpy-cross %s:\n%s" % (name, result.stderr))
+
+            with open(out, "rb") as f:
+                files[os.path.basename(out)] = f.read()
 
     return files
 
@@ -145,13 +185,19 @@ def main():
                         help="nie czekaj na restart i potwierdzenie")
     args = parser.parse_args()
 
+    check_mpy_cross()
     esp = Esp(args.url, read_token())
     files = local_files()
 
     print("ESP:", esp.url)
 
+    # zrodla .py na ESP tez: zaslaniaja .mpy, apply odklada je do .bak
+    sources = [name[:-4] + ".py" for name in files]
+
     try:
-        status = esp.status_batched(list(files) + list(PROTECTED))
+        status = esp.status_batched(
+            list(files) + sources + list(PROTECTED)
+        )
     except (OSError, RuntimeError) as e:
         sys.exit("Brak polaczenia z ESP: %s" % e)
 
@@ -162,17 +208,20 @@ def main():
               status["state"])
 
     if args.files:
-        unknown = [n for n in args.files if n not in files]
+        # sensor.py albo sensor.mpy - i tak idzie skompilowany
+        wanted = [os.path.splitext(n)[0] + ".mpy" for n in args.files]
+        unknown = [n for n, w in zip(args.files, wanted) if w not in files]
 
         if unknown:
             sys.exit("Nie ma takich plikow w App/ (albo sa chronione): %s"
                      % ", ".join(unknown))
 
-        changed = args.files
+        changed = wanted
     else:
         changed = [
             name for name, content in files.items()
             if remote.get(name) != hashlib.sha256(content).hexdigest()
+            or name[:-4] + ".py" in remote
         ]
 
     for name in PROTECTED:

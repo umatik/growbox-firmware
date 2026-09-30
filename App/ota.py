@@ -1,5 +1,9 @@
 # ota.py - aktualizacja plikow .py przez WiFi
 #
+# Pliki .py albo prekompilowane .mpy (deploy.py wysyla .mpy: bez kompilacji
+# na ESP starcza wiecej RAM-u). MicroPython laduje X.py przed X.mpy, wiec
+# apply odklada druga wersje modulu do .bak - rollback w main.py ja przywraca.
+#
 # 1. PUT /api/files/<plik>  -> zapis do <plik>.new (strumieniowo, z sha256)
 # 2. POST /api/update/apply -> <plik> -> <plik>.bak, <plik>.new -> <plik>,
 #                              zapis ota_state.json (pending) i reset
@@ -65,16 +69,40 @@ def _remove(path):
         pass
 
 
+def _stem(name):
+    """Nazwa modulu dla X.py / X.mpy, inaczej None."""
+    for ext in (".py", ".mpy"):
+        if name.endswith(ext):
+            return name[:-len(ext)]
+
+    return None
+
+
 def valid_name(name):
-    """Tylko pliki .py w katalogu glownym, bez chronionych."""
-    if not name.endswith(".py") or name in PROTECTED:
+    """Tylko pliki .py / .mpy w katalogu glownym, bez chronionych."""
+    stem = _stem(name)
+
+    if not stem or name in PROTECTED or stem + ".py" in PROTECTED:
         return False
 
-    for c in name[:-3]:
+    for c in stem:
         if not (c.isalpha() or c.isdigit() or c == "_"):
             return False
 
-    return len(name) > 3
+    return True
+
+
+def _other(name):
+    """Druga wersja modulu: X.py <-> X.mpy."""
+    stem = _stem(name)
+    return stem + (".mpy" if name.endswith(".py") else ".py")
+
+
+def _staged_names():
+    return [
+        n[:-4] for n in os.listdir()
+        if n.endswith(".new") and valid_name(n[:-4])
+    ]
 
 
 def _sha256_file(path):
@@ -114,9 +142,9 @@ async def status(names=None):
     staged = []
 
     for name in sorted(os.listdir()):
-        if name.endswith(".py.new"):
+        if name.endswith(".new") and valid_name(name[:-4]):
             staged.append(name[:-4])
-        elif name.endswith(".py") and (names is None or name in names):
+        elif _stem(name) and (names is None or name in names):
             await asyncio.sleep_ms(0)
             files.append({
                 "name": name,
@@ -187,19 +215,17 @@ async def receive(name, reader, length, body, sha256):
 
 
 def discard():
-    removed = []
+    removed = _staged_names()
 
-    for name in os.listdir():
-        if name.endswith(".py.new"):
-            _remove(name)
-            removed.append(name[:-4])
+    for name in removed:
+        _remove(name + ".new")
 
     return removed
 
 
 def apply():
     """Podmienia pliki .new i zapisuje stan pending. Reset robi wolajacy."""
-    staged = [n[:-4] for n in os.listdir() if n.endswith(".py.new")]
+    staged = _staged_names()
 
     if not staged:
         raise OtaError("nothing staged")
@@ -211,18 +237,32 @@ def apply():
 
     files = list(keep_bak)
 
+    def set_aside(name):
+        # stara wersja do .bak (rollback), w poprzedniej niepotwierdzonej
+        # aktualizacji .bak juz jest - biezacy plik po prostu znika
+        if name in files:
+            _remove(name)
+        elif _exists(name):
+            _remove(name + ".bak")
+            os.rename(name, name + ".bak")
+            files.append(name)
+
     for name in staged:
-        if name not in keep_bak:
+        if name not in files:
             if _exists(name):
-                _remove(name + ".bak")
-                os.rename(name, name + ".bak")
+                set_aside(name)
             else:
                 # nowy plik - przy rollbacku do usuniecia
                 _remove(name + ".bak")
-
-            files.append(name)
+                files.append(name)
         else:
             _remove(name)
+
+        # X.py zaslanialby nowy X.mpy (i odwrotnie zostalby martwy plik)
+        other = _other(name)
+
+        if other not in staged and _exists(other):
+            set_aside(other)
 
         os.rename(name + ".new", name)
 
