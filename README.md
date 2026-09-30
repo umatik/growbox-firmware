@@ -12,16 +12,27 @@ The phone app lives in [growbox-app](https://github.com/umatik/growbox-app).
   clock. The fan follows the light, with an optional night fan and a
   separate night speed.
 - **Auto fan** (Manual / veg mode): the fan speed follows the
-  temperature, with separate targets for lights on and lights off.
-  Readings are rounded to 10 % steps with hysteresis, so sensor noise
-  does not make the fan hunt.
+  temperature, with separate targets for lights on and lights off. It
+  stays on the lowest speed up to the middle of the band. Readings are
+  rounded to 10 % steps with hysteresis, so sensor noise does not make
+  the fan hunt.
+- **Night humidity guard** (Auto mode, night fan on): above
+  `auto.nightHumidity.ideal` the fan speeds up from the night level to
+  full speed at `max`.
 - **Fan dimmer:** calibrated PWM range, plus a short kick-start so the
   fan spins up from standstill at low speeds.
 - **Climate log:** temperature and humidity go to the SD card every
   5 min. It is readable as JSON pages, as an incremental sync or as CSV.
-- **Watering log** stored on the device (`POST /api/feeding`).
-- **OLED status display** with a hardware button to switch it on and
-  off.
+- **Watering log** stored on the device (`POST /api/feeding`), with undo.
+- **OLED display** with a hardware button to switch it on and off:
+  - boot screen with the current step (WiFi, IP address, clock, SD card)
+    and a progress bar;
+  - dashboard with large temperature and humidity, WiFi signal bars, SD
+    card and light and fan state;
+  - a static screen during OTA updates (receiving, installing,
+    verifying).
+
+  A display switched off stays dark during boot and updates.
 - **OTA updates over WiFi** with automatic rollback. See below.
 - **Self-healing**
   - Hardware watchdog.
@@ -68,6 +79,9 @@ Pins and dimmer calibration live in `App/esp_config.py`.
    mpremote connect /dev/cu.usbserial-0001 cp App/*.py :
    ```
 
+   The first `./deploy.py` afterwards replaces the sources with
+   precompiled `.mpy` modules (see below).
+
 `main.py`, `boot.py` and `secrets.py` can only be changed over USB. OTA
 does not touch them, so a broken update can never lock you out.
 
@@ -79,10 +93,19 @@ does not touch them, so a broken update can never lock you out.
 ./deploy.py sensor.py    # send selected files even if unchanged
 ```
 
+Modules go to the board precompiled with `mpy-cross`, so the ESP does not
+compile sources at boot and keeps more RAM free. `mpy-cross` has to match
+the MicroPython on the board (1.27):
+
+```bash
+pipx install mpy-cross==1.27.0.post2
+```
+
 How an update works:
 
 1. Files are uploaded as `.new`, checked with sha256 and swapped in on
-   restart.
+   restart. A leftover `X.py` would shadow the new `X.mpy`, so it is
+   moved to `.bak` as well.
 2. The new version confirms itself after 60 s of healthy running.
 3. If it does not confirm within 3 boots, `main.py` restores the
    previous files.
@@ -96,7 +119,7 @@ Every call needs `Authorization: Bearer <API_TOKEN>`.
 
 | Method | Path                            | What it does                                |
 | ------ | ------------------------------- | ------------------------------------------- |
-| GET    | `/api/config`                   | Config, sensor reading, mode, fan level     |
+| GET    | `/api/config`                   | Config, sensor reading, mode, fan level, WiFi RSSI |
 | GET    | `/api/status`                   | Uptime, memory, WiFi RSSI, recent events    |
 | POST   | `/api/mode/toggle`              | Switch Auto / Manual                        |
 | POST   | `/api/light/toggle`             | Light relay                                 |
@@ -108,12 +131,13 @@ Every call needs `Authorization: Bearer <API_TOKEN>`.
 | POST   | `/api/light-schedule`           | `[{"on": "18:00", "off": "06:00"}]`         |
 | POST   | `/api/flowering/start-date`     | `{"date": "YYYY-MM-DD" \| null}`            |
 | POST   | `/api/feeding`                  | `{"date": ISO}` log a watering              |
+| POST   | `/api/feeding/undo`             | `{"date": ISO}` remove it (no date = last)  |
 | POST   | `/api/display/toggle`           | OLED on / off                               |
 | GET    | `/api/environment`              | Climate log: `limit`, `before`, `since`, `step` |
 | GET    | `/api/environment.csv`          | Climate log as CSV                          |
 | POST   | `/api/environment/erase`        | Clear the climate log                       |
-| GET    | `/api/update`                   | OTA state and file checksums (`?files=a.py,b.py`) |
-| PUT    | `/api/files/<name>?sha256=...`  | Stage a file for OTA                        |
+| GET    | `/api/update`                   | OTA state and file checksums (`?files=a.mpy,b.mpy`) |
+| PUT    | `/api/files/<name>?sha256=...`  | Stage a `.py` / `.mpy` file for OTA         |
 | POST   | `/api/update/apply`             | Apply staged files and restart              |
 | POST   | `/api/update/discard`           | Drop staged files                           |
 

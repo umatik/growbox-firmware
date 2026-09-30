@@ -572,6 +572,8 @@ async def _handle_request(reader, writer):
                         else "OFF"
                     ),
                     "fanLevel": _dimmer.get_level(),
+                    # sila sygnalu WiFi (dBm) - aplikacja pokazuje ja w naglowku
+                    "rssi": _wifi_rssi(),
                 }
             })
 
@@ -891,6 +893,36 @@ async def _handle_request(reader, writer):
             feeding["count"] += 1
             # aplikacja liczy z historii rytm podlewania; ogon wystarczy
             feeding["history"] = (feeding["history"] + [date])[-_FEEDING_HISTORY:]
+            config_store.save(config)
+
+            writer.write(("HTTP/1.1 200 OK\r\n" + cors + "\r\nOK").encode())
+            await _drain(writer)
+            return
+
+        # POST /api/feeding/undo  {"date": ISO}  (cofniecie podlania; bez
+        # daty - ostatnie)
+
+        if method == "POST" and path == "/api/feeding/undo":
+            body = request[request.find("\r\n\r\n") + 4:].strip()
+            date = json.loads(body).get("date") if body else None
+
+            feeding = config["feeding"]
+            history = feeding["history"]
+
+            if date is None and history:
+                date = history[-1]
+
+            if date not in history:
+                writer.write(
+                    ("HTTP/1.1 404 Not Found\r\n" + cors + "\r\nNot found").encode()
+                )
+                await _drain(writer)
+                return
+
+            # ostatnie wystapienie - to wlasnie dodane z aplikacji
+            del history[len(history) - 1 - history[::-1].index(date)]
+            feeding["count"] = max(0, feeding["count"] - 1)
+            feeding["lastFedAt"] = history[-1] if history else None
             config_store.save(config)
 
             writer.write(("HTTP/1.1 200 OK\r\n" + cors + "\r\nOK").encode())
@@ -1226,6 +1258,7 @@ def get_display_state():
         "fan": bool(
             config["relayFan"]["state"]
         ),
+        "fanLevel": _dimmer.get_level(),
         "temperature": sensor_data["temperature"],
         "humidity": sensor_data["humidity"],
         "floweringStartDate": config.get(
@@ -1234,6 +1267,8 @@ def get_display_state():
         ).get(
             "floweringStartDate"
         ),
+        "rssi": _wifi_rssi(),
+        "sd": sd_logger.is_enabled(),
     }
 
 
