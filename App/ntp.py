@@ -3,7 +3,6 @@ import ntptime
 import uasyncio as asyncio
 import utime
 
-import display
 
 
 def polish_utc_offset(year, month, day):
@@ -70,7 +69,6 @@ async def sync_ntp():
             ntptime.settime()
 
             print("NTP synced")
-            display.text("NTP synced", 0, 0, clear=True)
 
             synced = True
             _synced_once = True
@@ -104,10 +102,10 @@ async def sync_ntp():
                 "NTP retry failed:",
                 e
             )
-            display.text("NTP retry failed: " + str(e), 0, 0, clear=True)
 
             await asyncio.sleep(2)
 
     if not synced:
         print("NTP failed after retries")
-        display.text("NTP failed", 0, 0, clear=True)
+
+    return synced

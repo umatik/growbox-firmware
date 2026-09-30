@@ -54,24 +54,17 @@ async def connect_wifi():
     station = _new_wlan()
 
     print("Connecting to WiFi:", SSID)
-    display.text("Connecting", 0, 0, clear=True)
-    display.text("to WiFi:", 0, 10, clear=False)
-    display.text(SSID, 0, 30, clear=False)
 
     if await _join_wifi(station):
         wlan = station
         myIp = wlan.ifconfig()[0]
         print("Connection IP:", myIp)
-        display.text("Connection IP:", 0, 0, clear=True)
-        display.text(myIp, 0, 20, clear=False)
         return wlan
 
     print(
         "WiFi unavailable at startup; "
         "the application will keep retrying"
     )
-    display.text("Connecting...", 0, 0, clear=True)
-
     return None
 
 
@@ -83,9 +76,8 @@ async def wifi_watchdog():
     while True:
         if wlan is None or not wlan.isconnected():
             print("WiFi lost! Reconnecting...")
+            # LCD: dashboard pokazuje OFFLINE
             events.log("wifi lost")
-            display.text("WiFi lost! ", 0, 0, clear=True)
-            display.text("Reconnecting...", 0, 10, clear=False)
 
             try:
                 if wlan is not None:
@@ -127,7 +119,6 @@ async def wifi_watchdog():
                     "WiFi reconnect error:",
                     e
                 )
-                display.text("WiFi error", 0, 0, clear=True)
 
         await asyncio.sleep(15)
 

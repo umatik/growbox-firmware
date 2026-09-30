@@ -2,6 +2,7 @@
 import machine
 import uasyncio as asyncio
 
+import display
 import ota
 import server
 
@@ -30,6 +31,7 @@ async def handle(method, route, request, body, reader, writer, cors):
 
     if method == "PUT" and route.startswith("/api/files/"):
         name = route[len("/api/files/"):]
+        display.show_update("RECEIVING")
 
         try:
             length = int(server._header(request, "content-length") or "0")
@@ -65,6 +67,7 @@ async def handle(method, route, request, body, reader, writer, cors):
             return True
 
         print("OTA: applied", files, "-> reset")
+        display.show_update("INSTALLING")
 
         await server._send_json(
             writer, cors, "200 OK",
@@ -76,6 +79,7 @@ async def handle(method, route, request, body, reader, writer, cors):
     # POST /api/update/discard  (usun pliki .new po przerwanym uploadzie)
 
     if method == "POST" and route == "/api/update/discard":
+        display.end_update()
         await server._send_json(
             writer, cors, "200 OK",
             {"status": "discarded", "files": ota.discard()}

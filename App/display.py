@@ -1,3 +1,4 @@
+import framebuf
 import uasyncio as asyncio
 import utime
 from machine import Pin, I2C
@@ -9,6 +10,18 @@ _oled = None
 _state_provider = None
 _enabled = False
 _button_led = None
+
+# Aktualizacja OTA: zamiast odswiezanego co sekunde dashboardu statyczny
+# ekran (RECEIVING / INSTALLING / VERIFYING). None = zwykly dashboard.
+_update_phase = None
+_update_ticks = 0
+# upload urwany bez discard (np. padl deploy.py) - wracamy do dashboardu
+UPDATE_IDLE_MS = 120 * 1000
+
+# Start plytki: statyczny ekran z kielkiem, etapem (WIFI, CLOCK...) i paskiem
+# postepu. None = start skonczony (finish_boot).
+_boot_step = "STARTING"
+_boot_progress = 0
 
 
 def init():
@@ -39,15 +52,7 @@ def init():
     _enabled = True
     _button_led.value(1)
 
-    _oled.fill(0)
-
-    _oled.text(
-        "Starting...",
-        0,
-        0
-    )
-
-    _oled.show()
+    _redraw()
 
 
 def set_state_provider(provider):
@@ -56,23 +61,29 @@ def set_state_provider(provider):
     _state_provider = provider
 
 
-def boot_step(message):
-    if _oled is None:
+def boot_step(step, progress):
+    """Etap startu (max 16 znakow) i postep 0-100; po finish_boot nic."""
+    global _boot_step
+    global _boot_progress
+
+    if _boot_step is None:
         return
 
-    _oled.fill(0)
+    _boot_step = str(step)[:16]
+    _boot_progress = max(0, min(100, progress))
+    _redraw()
 
-    _oled.text(
-        str(message),
-        0,
-        0
-    )
 
-    _oled.show()
+def finish_boot():
+    global _boot_step
+
+    _boot_step = None
+    _redraw()
 
 
 def text(message, x=0, y=0, clear=True):
-    if _oled is None:
+    # wylaczony LCD zostaje ciemny, dashboard ma pierwszenstwo
+    if _oled is None or not _enabled:
         return
 
     if clear:
@@ -122,226 +133,281 @@ def set_enabled(enabled):
             1 if enabled else 0
         )
 
+    _redraw()
+
+
+def _redraw():
+    # kolejnosc: start plytki, aktualizacja OTA, dashboard
     if _oled is None:
         return
 
-    if enabled:
-        render_dashboard()
-    else:
+    if not _enabled:
         _oled.fill(0)
         _oled.show()
+    elif _boot_step:
+        _draw_boot()
+    elif _update_phase:
+        _draw_update()
+    else:
+        render_dashboard()
+
+
+def _draw_centered(message, y):
+    _oled.text(message, (128 - 8 * len(message)) // 2, y)
+
+
+def _draw_boot():
+    o = _oled
+    o.fill(0)
+
+    # ikona: kielek w doniczce
+    o.fill_rect(63, 7, 3, 19, 1)
+    o.ellipse(53, 14, 10, 3, 1, True)
+    o.ellipse(75, 9, 10, 3, 1, True)
+    o.fill_rect(51, 25, 26, 3, 1)
+
+    for i in range(6):
+        o.hline(54 + i // 2, 28 + i, 20 - (i // 2) * 2, 1)
+
+    _draw_centered("BOX PANEL", 40)
+    _draw_centered(_boot_step, 52)
+
+    # pasek postepu na dole
+    o.rect(0, 61, 128, 3, 1)
+    o.fill_rect(0, 61, 128 * _boot_progress // 100, 3, 1)
+    o.show()
+
+
+def _draw_update():
+    o = _oled
+    o.fill(0)
+
+    # ikona: strzalka w dol do tacki
+    o.fill_rect(62, 2, 5, 14, 1)
+
+    for i in range(9):
+        o.hline(56 + i, 16 + i, 17 - 2 * i, 1)
+
+    o.fill_rect(48, 22, 3, 10, 1)
+    o.fill_rect(77, 22, 3, 10, 1)
+    o.fill_rect(48, 30, 32, 3, 1)
+
+    _draw_centered("UPDATING", 40)
+    _draw_centered(_update_phase, 52)
+    o.show()
+
+
+def show_update(phase):
+    """Statyczny ekran aktualizacji; wolany przy kazdym kroku OTA."""
+    global _update_phase
+    global _update_ticks
+
+    _update_ticks = utime.ticks_ms()
+
+    if phase == _update_phase:
+        return
+
+    _update_phase = phase
+
+    # wylaczony LCD zostaje ciemny - swiatlo w okresie ciemnym
+    _redraw()
+
+
+def end_update():
+    global _update_phase
+
+    if _update_phase is None:
+        return
+
+    _update_phase = None
+    _redraw()
+
+
+# Dashboard 128x64:
+#   [WiFi] MANUAL / AUTO W3        [SD] 21:34
+#   ------------------------------------------
+#   [term] 23.5C            [kropla] 45%       <- cyfry 2x
+#   ------------------------------------------
+#   [slonce/ksiezyc] ON     [wentylator] 40%
+
+_glyph = None
+
+
+def _big_text(message, x, y):
+    """Tekst czcionka 8x8 powiekszona 2x (16 px na znak)."""
+    global _glyph
+
+    if _glyph is None:
+        # jeden staly bufor na znak - bez smieci co sekunde
+        _glyph = framebuf.FrameBuffer(bytearray(8), 8, 8, framebuf.MONO_HLSB)
+
+    for ch in message:
+        _glyph.fill(0)
+        _glyph.text(ch, 0, 0, 1)
+
+        for gy in range(8):
+            for gx in range(8):
+                if _glyph.pixel(gx, gy):
+                    _oled.fill_rect(x + 2 * gx, y + 2 * gy, 2, 2, 1)
+
+        x += 16
+
+
+def _wifi_icon(x, y, connected, rssi):
+    if not connected:
+        _oled.line(x, y + 1, x + 6, y + 7, 1)
+        _oled.line(x, y + 7, x + 6, y + 1, 1)
+        return
+
+    bars = 1
+
+    if rssi is not None:
+        bars = 4 if rssi >= -60 else 3 if rssi >= -70 else 2 if rssi >= -80 else 1
+
+    for i in range(4):
+        h = 2 * i + 2
+
+        if i < bars:
+            _oled.fill_rect(x + 3 * i, y + 8 - h, 2, h, 1)
+        else:
+            _oled.pixel(x + 3 * i, y + 7, 1)
+
+
+def _sd_icon(x, y):
+    _oled.rect(x, y + 1, 6, 7, 1)
+    _oled.fill_rect(x, y, 4, 2, 1)
+
+
+def _thermometer(x, y):
+    _oled.rect(x + 1, y, 3, 11, 1)
+    _oled.ellipse(x + 2, y + 12, 2, 2, 1, True)
+
+
+def _drop(x, y):
+    _oled.ellipse(x + 3, y + 10, 3, 3, 1, True)
+    _oled.line(x + 3, y, x, y + 9, 1)
+    _oled.line(x + 3, y, x + 6, y + 9, 1)
+    _oled.line(x + 3, y + 1, x + 3, y + 8, 1)
+    _oled.line(x + 2, y + 4, x + 2, y + 8, 1)
+    _oled.line(x + 4, y + 4, x + 4, y + 8, 1)
+
+
+def _sun(cx, cy):
+    _oled.ellipse(cx, cy, 3, 3, 1, True)
+
+    for dx, dy in ((0, -6), (0, 6), (-6, 0), (6, 0)):
+        _oled.line(cx + dx // 2 + (dx > 0) - (dx < 0), cy + dy // 2 + (dy > 0) - (dy < 0), cx + dx, cy + dy, 1)
+
+    for dx, dy in ((-4, -4), (4, -4), (-4, 4), (4, 4)):
+        _oled.pixel(cx + dx, cy + dy, 1)
+        _oled.pixel(cx + dx + (1 if dx > 0 else -1), cy + dy + (1 if dy > 0 else -1), 1)
+
+
+def _moon(cx, cy):
+    _oled.ellipse(cx, cy, 5, 5, 1, True)
+    _oled.ellipse(cx + 3, cy - 2, 4, 4, 0, True)
+
+
+def _fan(cx, cy, on):
+    _oled.ellipse(cx, cy, 6, 6, 1)
+
+    if on:
+        # wiatraczek: cztery lopatki przesuniete wokol osi
+        for dx, dy, rx, ry in (
+                (-1, -3, 2, 1), (3, -1, 1, 2), (1, 3, 2, 1), (-3, 1, 1, 2)
+        ):
+            _oled.ellipse(cx + dx, cy + dy, rx, ry, 1, True)
+
+        _oled.pixel(cx, cy, 1)
+    else:
+        _oled.pixel(cx, cy, 1)
+
+
+def _flowering_week(start, now):
+    try:
+        year, month, day = [int(x) for x in start.split("-")]
+        start_ts = utime.mktime((year, month, day, 0, 0, 0, 0, 0))
+        week = (utime.mktime(now) - start_ts) // 86400 // 7 + 1
+        return week if week > 0 else None
+    except Exception:
+        return None
 
 
 def render_dashboard():
     if _oled is None or _state_provider is None:
         return
 
-    if not _enabled:
+    if not _enabled or _update_phase or _boot_step:
         return
 
     state = _state_provider()
-
     now = utime.localtime()
+    o = _oled
+    o.fill(0)
 
-    blink = ":" if now[5] % 2 == 0 else " "
-
-    time_str = "%02d%s%02d" % (
-        now[3],
-        blink,
-        now[4]
-    )
-
-    connection_text = (
-        "ONLINE"
-        if state["wifi"]
-        else "OFFLINE"
-    )
-
-    flowering_text = ""
-
-    flowering_start = state.get(
-        "floweringStartDate"
-    )
-
-    if flowering_start:
-        try:
-            year, month, day = [
-                int(x)
-                for x in flowering_start.split("-")
-            ]
-
-            start_timestamp = utime.mktime(
-                (
-                    year,
-                    month,
-                    day,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0
-                )
-            )
-
-            now_timestamp = utime.mktime(now)
-
-            flowering_week = (
-                                     (
-                                             (
-                                                     now_timestamp
-                                                     - start_timestamp
-                                             ) // 86400
-                                     ) // 7
-                             ) + 1
-
-            if flowering_week > 0:
-                flowering_text = (
-                        ", T%d  "
-                        % flowering_week
-                )
-
-        except Exception:
-            flowering_text = ""
+    # pasek stanu
+    _wifi_icon(0, 0, state["wifi"], state.get("rssi"))
 
     mode = state["mode"]
+    week = None
 
-    if mode == "AUTO":
-        day_night = (
-            "DAY"
-            if state["light"]
-            else "NIGHT"
-        )
+    if mode == "AUTO" and state.get("floweringStartDate"):
+        week = _flowering_week(state["floweringStartDate"], now)
 
-        mode_text = (
-                "AUTO: "
-                + day_night
-                + flowering_text
-        )
+    o.text(mode + (" W%d" % week if week else ""), 14, 1)
 
+    if state.get("sd"):
+        _sd_icon(80, 0)
+
+    o.text(
+        "%02d%s%02d" % (now[3], ":" if now[5] % 2 == 0 else " ", now[4]),
+        88, 1
+    )
+    o.hline(0, 11, 128, 1)
+
+    # klimat
+    temperature = state.get("temperature")
+    humidity = state.get("humidity")
+
+    _thermometer(0, 16)
+
+    if isinstance(temperature, (int, float)):
+        whole = int(temperature)
+        _big_text(str(whole), 8, 16)
+        x = 8 + 16 * len(str(whole))
+        # u gory stopnie, na dole (linia bazowa duzych cyfr) dziesiate
+        o.ellipse(x + 2, 18, 1, 1, 1)
+        o.text("C", x + 5, 16)
+        o.text(".%d" % (int(round(temperature * 10)) % 10), x, 24)
     else:
-        day_night = (
-            "DAY"
-            if state["light"]
-            else "NIGHT"
-        )
+        _big_text("--", 8, 16)
 
-        mode_text = (
-                "MANUAL: "
-                + day_night
-        )
+    _drop(68, 16)
 
-    light_text = (
-        "ON"
-        if state["light"]
-        else "OFF"
-    )
-
-    if state["fan"]:
-        if (
-                mode == "AUTO"
-                and day_night == "NIGHT"
-        ):
-            fan_text = "ON (NIGHT)"
-        else:
-            fan_text = "ON"
+    if isinstance(humidity, (int, float)):
+        text = str(int(round(humidity)))
+        _big_text(text, 78, 16)
+        o.text("%", 78 + 16 * len(text), 24)
     else:
-        fan_text = "OFF"
+        _big_text("--", 78, 16)
 
-    temperature = state.get(
-        "temperature",
-        "--"
-    )
+    o.hline(0, 38, 128, 1)
 
-    humidity = state.get(
-        "humidity",
-        "--"
-    )
-
-    if isinstance(
-            temperature,
-            (int, float)
-    ):
-        temperature = (
-                str(int(temperature))
-                + "C"
-        )
+    # urzadzenia
+    if state["light"]:
+        _sun(7, 51)
+        o.text("ON", 18, 48)
     else:
-        temperature = "--"
+        _moon(7, 51)
+        o.text("OFF", 18, 48)
 
-    if isinstance(
-            humidity,
-            (int, float)
-    ):
-        humidity = (
-                str(int(humidity))
-                + "%"
-        )
-    else:
-        humidity = "--"
-
-    _oled.fill(0)
-
-    _oled.text(
-        connection_text,
-        0,
-        0
+    _fan(72, 51, state["fan"])
+    o.text(
+        ("%d%%" % state["fanLevel"]) if state["fan"] else "OFF",
+        82, 48
     )
 
-    time_width = (
-            len(time_str) * 8
-    )
-
-    sd_width = 16
-    gap = 5
-
-    x_sd = 128 - sd_width
-
-    x_time = (
-            x_sd
-            - gap
-            - time_width
-    )
-
-    _oled.text(
-        time_str,
-        x_time,
-        0
-    )
-
-    _oled.text(
-        "SD",
-        x_sd,
-        0
-    )
-
-    _oled.text(
-        mode_text,
-        0,
-        12
-    )
-
-    _oled.text(
-        "LIGHT: " + light_text,
-        0,
-        24
-    )
-
-    _oled.text(
-        "FAN: " + fan_text,
-        0,
-        36
-    )
-
-    _oled.text(
-        "T: "
-        + temperature
-        + " H: "
-        + humidity,
-        0,
-        48
-    )
-
-    _oled.show()
+    o.show()
 
 
 def refresh():
@@ -355,6 +421,14 @@ def toggle(enabled):
 async def display_updater():
     while True:
         try:
+            if (
+                    _update_phase == "RECEIVING"
+                    and utime.ticks_diff(utime.ticks_ms(), _update_ticks)
+                    > UPDATE_IDLE_MS
+            ):
+                print("Display: update idle -> dashboard")
+                end_update()
+
             if _enabled:
                 render_dashboard()
 

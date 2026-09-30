@@ -140,6 +140,9 @@ async def ota_confirm_task():
     except Exception as e:
         print("OTA: confirm error:", repr(e))
 
+    # potwierdzona (albo nie bylo aktualizacji) - z powrotem dashboard
+    display.end_update()
+
 
 async def run_tasks():
     # wentylator wlaczony od startu (stan z config.json) - rozruch dimmera
@@ -189,17 +192,38 @@ async def boot():
         get_display_state
     )
 
-    sensor.init()
-
-    await connect_wifi()
-    await sync_ntp()
-
-    sd_logger.init(300)
-
-    # po komunikatach startowych LCD wg config.json (init() zawsze wlacza)
+    # wylaczony LCD zostaje ciemny juz od startu (init() zawsze wlacza)
     display.toggle(
         bool(server.config["display"]["enabled"])
     )
+
+    # nowa wersja po OTA czeka na potwierdzenie (ota_confirm_task)
+    if (ota.load_state() or {}).get("pending"):
+        display.show_update("VERIFYING")
+
+    sensor.init()
+
+    display.boot_step("WIFI", 15)
+    wlan = await connect_wifi()
+
+    if wlan:
+        # adres przez chwile - przydaje sie do aplikacji i deploy.py
+        display.boot_step(wlan.ifconfig()[0], 40)
+        await asyncio.sleep(1)
+    else:
+        display.boot_step("NO WIFI", 40)
+
+    display.boot_step("CLOCK", 55)
+
+    if not await sync_ntp():
+        display.boot_step("NO CLOCK", 70)
+
+    display.boot_step("SD CARD", 75)
+    sd_ok = sd_logger.init(300)
+
+    display.boot_step("READY" if sd_ok else "NO SD CARD", 100)
+    await asyncio.sleep(1)
+    display.finish_boot()
 
 
 def main():
