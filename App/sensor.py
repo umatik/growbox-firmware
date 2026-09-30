@@ -96,6 +96,16 @@ def read():
 
 
 def get():
+    # po 3 chybionych pomiarach (odpiety czujnik, blad I2C) brak odczytu
+    # zamiast ostatniej wartosci - inaczej API, log na SD i LCD pokazuja
+    # zamrozona temperature jako aktualna
+    if utime.time() - _last["ts"] > 3 * _interval_ms // 1000:
+        return {
+            "temperature": None,
+            "humidity": None,
+            "ts": _last["ts"]
+        }
+
     return _last
 
 
