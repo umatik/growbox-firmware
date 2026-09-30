@@ -43,9 +43,22 @@ def log(message):
         print("EVENT log error:", repr(e))
 
 
+# koncowka pliku czytana przez tail() - starcza na ~12 linii po ~60 B
+TAIL_BYTES = 1024
+
+
 def tail(count=12):
+    # tylko koncowka pliku: caly plik (do 4 KB) + split to ~10 KB smieci
+    # na jedno GET /api/status - sterta GC rosla kosztem sterty ESP-IDF
+    # i konczylo sie resetem "heap exhausted"
     try:
+        size = os.stat(EVENTS_FILE)[6]
+
         with open(EVENTS_FILE) as f:
+            if size > TAIL_BYTES:
+                f.seek(size - TAIL_BYTES)
+                f.readline()  # urwana linia
+
             lines = f.read().split("\n")
     except OSError:
         return []
