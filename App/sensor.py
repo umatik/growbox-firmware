@@ -35,6 +35,22 @@ def init(interval_ms=10000):
     _interval_ms = interval_ms
 
 
+def _crc8(b0, b1):
+    # CRC-8 z dokumentacji SHT4x: polynom 0x31, start 0xFF
+    crc = 0xFF
+
+    for byte in (b0, b1):
+        crc ^= byte
+
+        for _ in range(8):
+            if crc & 0x80:
+                crc = ((crc << 1) ^ 0x31) & 0xFF
+            else:
+                crc = (crc << 1) & 0xFF
+
+    return crc
+
+
 def read():
     global _last
 
@@ -53,6 +69,15 @@ def read():
             ADDRESS,
             6
         )
+
+        # przeklamane bajty na I2C (np. same 0xFF) dawaly wilgotnosc
+        # przycieta do 100% - taki pomiar odrzucamy, zostaje poprzedni
+        if (
+                _crc8(data[0], data[1]) != data[2]
+                or _crc8(data[3], data[4]) != data[5]
+        ):
+            print("Sensor error: CRC")
+            return
 
         t_raw = (
                         data[0] << 8
