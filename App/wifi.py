@@ -18,10 +18,14 @@ NETWORKS = getattr(secrets, "NETWORKS", None) or (
 # znana siec jest wyraznie silniejsza. Zmiana to kilka sekund bez WiFi,
 # stad margines - zeby nie skakac miedzy dwiema podobnymi sieciami.
 ROAM_CHECK_S = 600
+# wzmacniacz nadaje, ale nie wpuszcza: kazda proba to ~25 s bez WiFi, wiec
+# po nieudanej odstep rosnie x2 do ROAM_CHECK_MAX_S
+ROAM_CHECK_MAX_S = 3600
 ROAM_WEAK_RSSI = -65
 ROAM_MARGIN_DB = 10
 
 wlan = None
+joined_ssid = None
 display.init()
 
 
@@ -113,11 +117,14 @@ async def _join_one(station, ssid, password, bssid, timeout_s):
 async def _join_wifi(station, timeout_s=20):
     """Join Wi-Fi without blocking the rest of the asyncio application."""
 
+    global joined_ssid
+
     if station.isconnected():
         return True
 
     for ssid, password, bssid in _candidates(station):
         if await _join_one(station, ssid, password, bssid, timeout_s):
+            joined_ssid = ssid
             events.log("wifi " + ssid)
             return True
 
@@ -167,22 +174,6 @@ def _better_network(station):
     return best
 
 
-async def _roam(station):
-    """Przejscie na wyraznie silniejsza siec. True, gdy po nim jest WiFi."""
-
-    better = _better_network(station)
-
-    if not better:
-        return True
-
-    events.log("wifi roam to " + better)
-    station.disconnect()
-
-    # _join_wifi skanuje jeszcze raz i bierze najsilniejsza; bez polaczenia
-    # zajmie sie tym zwykla sciezka watchdoga
-    return await _join_wifi(station)
-
-
 async def connect_wifi():
     global wlan
 
@@ -206,23 +197,40 @@ async def wifi_watchdog():
 
     failed_attempts = 0
     since_roam_check = 0
+    roam_interval = ROAM_CHECK_S
+    roaming = None
 
     while True:
         if wlan is not None and wlan.isconnected():
             since_roam_check += 15
 
-            if since_roam_check >= ROAM_CHECK_S:
+            if since_roam_check >= roam_interval:
                 since_roam_check = 0
 
                 try:
-                    await _roam(wlan)
+                    better = _better_network(wlan)
                 except Exception as e:
                     print("WiFi roam error:", e)
+                    better = None
+
+                if better:
+                    # Tylko rozlaczenie - ponowne laczenie na tym samym
+                    # interfejsie ESP-IDF odrzucal (polaczenie dopiero po
+                    # ~20 s). Ponizsza sciezka zaczyna od nowego interfejsu,
+                    # a jej skan wybiera najsilniejsza siec.
+                    events.log("wifi roam to " + better)
+                    roaming = better
+                    wlan.disconnect()
+
+                    await asyncio.sleep(1)
 
         if wlan is None or not wlan.isconnected():
-            print("WiFi lost! Reconnecting...")
-            # LCD: dashboard pokazuje OFFLINE
-            events.log("wifi lost")
+            if not roaming:
+                print("WiFi lost! Reconnecting...")
+                # LCD: dashboard pokazuje OFFLINE
+                events.log("wifi lost")
+
+            since_roam_check = 0
 
             try:
                 if wlan is not None:
@@ -235,6 +243,12 @@ async def wifi_watchdog():
 
                 if await _join_wifi(wlan):
                     failed_attempts = 0
+
+                    if roaming:
+                        roam_interval = (
+                            ROAM_CHECK_S if joined_ssid == roaming
+                            else min(roam_interval * 2, ROAM_CHECK_MAX_S)
+                        )
 
                     print(
                         "WiFi restored:",
@@ -257,7 +271,10 @@ async def wifi_watchdog():
 
                     await asyncio.sleep(delay)
 
+                roaming = None
+
             except Exception as e:
+                roaming = None
                 failed_attempts += 1
 
                 print(
