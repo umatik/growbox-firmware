@@ -73,6 +73,16 @@ Pins and dimmer calibration live in `App/esp_config.py`.
    PASSWORD = "your-password"
    ```
 
+   The board joins the strongest network in range out of `SSID` and
+   `SSID + "_EXT"` (the default name of a TP-Link range extender), so it
+   falls back to the router when the extender is off. Other names go in
+   an optional list:
+
+   ```python
+   NETWORKS = (("your-network", "your-password"),
+               ("your-extender", "its-password"))
+   ```
+
 3. Copy the app to the board:
 
    ```bash
@@ -155,7 +165,6 @@ App/            firmware (copied to the board root)
   sd_logger.py  climate log on the SD card
   ...
 deploy.py       OTA client for your computer
-test/           hardware test scripts
 ```
 
 ## Credits

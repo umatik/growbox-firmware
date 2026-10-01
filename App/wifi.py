@@ -3,7 +3,15 @@ import uasyncio as asyncio
 
 import display
 import events
-from secrets import SSID, PASSWORD
+import secrets
+
+# Znane sieci: (ssid, haslo). Wzmacniacz TP-Link RE200 rozglasza siec
+# routera jako <SSID>_EXT z tym samym haslem. secrets.py nie idzie przez
+# OTA, wiec bez NETWORKS w secrets.py obie sieci skladamy tutaj.
+NETWORKS = getattr(secrets, "NETWORKS", None) or (
+    (secrets.SSID, secrets.PASSWORD),
+    (secrets.SSID + "_EXT", secrets.PASSWORD),
+)
 
 wlan = None
 display.init()
@@ -24,13 +32,59 @@ def _new_wlan():
     return station
 
 
-async def _join_wifi(station, timeout_s=20):
-    """Join Wi-Fi without blocking the rest of the asyncio application."""
+def _candidates(station):
+    """Znane sieci w zasiegu, najsilniejsza pierwsza: [(ssid, haslo, bssid)].
 
-    if station.isconnected():
-        return True
+    Gdy wzmacniacz padnie, nie ma go w skanie i zostaje siec routera.
+    Pusty skan (blad, chwilowa gluchota) - proba wszystkich po kolei.
+    """
 
-    station.connect(SSID, PASSWORD)
+    passwords = dict(NETWORKS)
+    found = {}
+
+    try:
+        scan = station.scan()
+    except OSError as e:
+        print("WiFi scan error:", e)
+        scan = []
+
+    for entry in scan:
+        try:
+            ssid = entry[0].decode()
+        except UnicodeError:
+            continue
+
+        rssi = entry[3]
+
+        if ssid in passwords and (
+            ssid not in found or rssi > found[ssid][1]
+        ):
+            found[ssid] = (entry[1], rssi)
+
+    if not found:
+        return [(ssid, password, None) for ssid, password in NETWORKS]
+
+    ranked = sorted(found, key=lambda ssid: found[ssid][1], reverse=True)
+
+    for ssid in ranked:
+        print("WiFi in range:", ssid, found[ssid][1], "dBm")
+
+    return [(ssid, passwords[ssid], found[ssid][0]) for ssid in ranked]
+
+
+async def _join_one(station, ssid, password, bssid, timeout_s):
+    print("Connecting to WiFi:", ssid)
+
+    try:
+        if bssid:
+            # konkretny punkt dostepu - wzmacniacz moze nadawac ta sama
+            # nazwe co router
+            station.connect(ssid, password, bssid=bssid)
+        else:
+            station.connect(ssid, password)
+    except OSError as e:
+        print("WiFi connect error:", e)
+        return False
 
     for second in range(timeout_s):
         if station.isconnected():
@@ -48,12 +102,30 @@ async def _join_wifi(station, timeout_s=20):
     return station.isconnected()
 
 
+async def _join_wifi(station, timeout_s=20):
+    """Join Wi-Fi without blocking the rest of the asyncio application."""
+
+    if station.isconnected():
+        return True
+
+    for ssid, password, bssid in _candidates(station):
+        if await _join_one(station, ssid, password, bssid, timeout_s):
+            events.log("wifi " + ssid)
+            return True
+
+        # przed nastepna siecia - inaczej ESP-IDF dalej probuje poprzedniej
+        try:
+            station.disconnect()
+        except OSError:
+            pass
+
+    return False
+
+
 async def connect_wifi():
     global wlan
 
     station = _new_wlan()
-
-    print("Connecting to WiFi:", SSID)
 
     if await _join_wifi(station):
         wlan = station
