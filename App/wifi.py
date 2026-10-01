@@ -13,6 +13,14 @@ NETWORKS = getattr(secrets, "NETWORKS", None) or (
     (secrets.SSID + "_EXT", secrets.PASSWORD),
 )
 
+# Powrot na lepsza siec, np. gdy wzmacniacz wroci po awarii, a ESP siedzi
+# na routerze: przy slabym sygnale co ROAM_CHECK_S skan i przejscie, gdy
+# znana siec jest wyraznie silniejsza. Zmiana to kilka sekund bez WiFi,
+# stad margines - zeby nie skakac miedzy dwiema podobnymi sieciami.
+ROAM_CHECK_S = 600
+ROAM_WEAK_RSSI = -65
+ROAM_MARGIN_DB = 10
+
 wlan = None
 display.init()
 
@@ -122,6 +130,59 @@ async def _join_wifi(station, timeout_s=20):
     return False
 
 
+def _better_network(station):
+    """Nazwa znanej sieci silniejszej o ROAM_MARGIN_DB od obecnej albo None."""
+
+    try:
+        rssi = station.status("rssi")
+    except (OSError, ValueError):
+        return None
+
+    if rssi >= ROAM_WEAK_RSSI:
+        return None
+
+    passwords = dict(NETWORKS)
+
+    try:
+        scan = station.scan()
+    except OSError as e:
+        print("WiFi scan error:", e)
+        return None
+
+    best = None
+    best_rssi = rssi + ROAM_MARGIN_DB - 1
+
+    for entry in scan:
+        try:
+            ssid = entry[0].decode()
+        except UnicodeError:
+            continue
+
+        if ssid in passwords and entry[3] > best_rssi:
+            best, best_rssi = ssid, entry[3]
+
+    if best:
+        print("WiFi roam:", rssi, "dBm ->", best, best_rssi, "dBm")
+
+    return best
+
+
+async def _roam(station):
+    """Przejscie na wyraznie silniejsza siec. True, gdy po nim jest WiFi."""
+
+    better = _better_network(station)
+
+    if not better:
+        return True
+
+    events.log("wifi roam to " + better)
+    station.disconnect()
+
+    # _join_wifi skanuje jeszcze raz i bierze najsilniejsza; bez polaczenia
+    # zajmie sie tym zwykla sciezka watchdoga
+    return await _join_wifi(station)
+
+
 async def connect_wifi():
     global wlan
 
@@ -144,8 +205,20 @@ async def wifi_watchdog():
     global wlan
 
     failed_attempts = 0
+    since_roam_check = 0
 
     while True:
+        if wlan is not None and wlan.isconnected():
+            since_roam_check += 15
+
+            if since_roam_check >= ROAM_CHECK_S:
+                since_roam_check = 0
+
+                try:
+                    await _roam(wlan)
+                except Exception as e:
+                    print("WiFi roam error:", e)
+
         if wlan is None or not wlan.isconnected():
             print("WiFi lost! Reconnecting...")
             # LCD: dashboard pokazuje OFFLINE

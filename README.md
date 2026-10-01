@@ -75,7 +75,9 @@ Pins and dimmer calibration live in `App/esp_config.py`.
 
    The board joins the strongest network in range out of `SSID` and
    `SSID + "_EXT"` (the default name of a TP-Link range extender), so it
-   falls back to the router when the extender is off. Other names go in
+   falls back to the router when the extender is off. While the signal
+   is weak it rescans every 10 minutes and moves to a known network at
+   least 10 dB stronger, so it returns to the extender once it is back. Other names go in
    an optional list:
 
    ```python
