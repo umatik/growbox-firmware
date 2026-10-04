@@ -10,6 +10,7 @@ import config_store
 import display
 import esp_config
 import events
+import humidifier
 import ota
 import sd_logger
 import sensor
@@ -165,6 +166,7 @@ async def run_tasks():
         supervise("display", display.display_updater),
         supervise("sensor", sensor.sensor_task),
         supervise("logger", sd_logger.task),
+        supervise("humidifier", lambda: humidifier.link_task(server.config)),
         ota_confirm_task(),
     )
 

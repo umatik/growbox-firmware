@@ -36,12 +36,18 @@ def init():
         freq=400000
     )
 
-    _oled = ssd1306.SSD1306_I2C(
-        128,
-        64,
-        i2c,
-        addr=0x3C
-    )
+    # bez wyswietlacza konstruktor rzuca OSError (ENODEV) przy pierwszej
+    # komendzie I2C - start ma isc dalej, _oled zostaje None
+    try:
+        _oled = ssd1306.SSD1306_I2C(
+            128,
+            64,
+            i2c,
+            addr=0x3C
+        )
+    except OSError as e:
+        _oled = None
+        print("Display: not found:", repr(e))
 
     _button_led = Pin(
         esp_config.PINS["lcd_button_led"],

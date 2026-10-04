@@ -10,6 +10,7 @@ import display
 import esp_config
 import events
 import fan_auto
+import humidifier
 import ota
 import ota_http
 import relay
@@ -187,16 +188,21 @@ def apply_auto_logic():
     else:
         fan_relay.off()
 
+    # automat wg temperatury ustawia obroty sam (apply_fan_auto)
     if config.get(
             "dimmer",
             {}
     ).get(
         "enabled",
         False
-    ):
+    ) and not fan_auto_enabled():
         if should_on:
             _dimmer.set_level(
-                config["dimmer"]["day"]["level"]
+                humidifier.fan_cap(
+                    config,
+                    config["dimmer"]["day"]["level"],
+                    sensor.get()["temperature"]
+                )
             )
         else:
             _dimmer.set_level(
@@ -204,7 +210,7 @@ def apply_auto_logic():
             )
 
 
-# --- Fan auto (MANUAL / vege) - logika w fan_auto.py ---
+# --- Fan auto (MANUAL: fanAuto, AUTO: fanAutoFlower) - logika w fan_auto.py ---
 
 def fan_auto_enabled():
     return fan_auto.enabled(config)
@@ -226,7 +232,13 @@ async def clock_scheduler():
     global _scheduler_tick
 
     while True:
-        # blad w jednym obiegu nie moze zatrzymac kolejnych
+        # blad w jednym obiegu nie moze zatrzymac kolejnych.
+        # Nawilzacz pierwszy: od jego stanu zalezy limit wentylatora.
+        try:
+            humidifier.update(config, light_relay.get_state())
+        except Exception as e:
+            print("SCHED: humidifier error:", repr(e))
+
         try:
             if config.get(
                     "auto",
@@ -347,6 +359,68 @@ def _wifi_rssi():
         return None
 
 
+def _update_humidifier(body):
+    """Zmiany z POST /api/humidifier; blad walidacji = tekst, nic nie zmienione."""
+    hum = config["humidifier"]
+    mode = body.get("mode")
+    fan = body.get("fan")
+
+    if mode is not None and mode not in ("manual", "auto"):
+        return "mode must be manual or auto"
+
+    if mode is None and fan is None:
+        return "mode or fan required"
+
+    if fan is not None and not isinstance(fan, dict):
+        return "fan must be an object"
+
+    if mode:
+        band = dict(hum[mode])
+
+        if "enabled" in body:
+            band["enabled"] = bool(body["enabled"])
+
+        for key in ("min", "max"):
+            if key in body:
+                value = body[key]
+
+                if not isinstance(value, (int, float)) or not 20 <= value <= 90:
+                    return key + " must be 20..90"
+
+                band[key] = value
+
+        if band["max"] - band["min"] < 2:
+            return "max must be at least 2 above min"
+
+    if fan is not None:
+        new_fan = dict(hum["fan"])
+
+        if "maxLevel" in fan:
+            level = fan["maxLevel"]
+
+            if not isinstance(level, int) or not 0 <= level <= 100:
+                return "fan.maxLevel must be 0..100"
+
+            new_fan["maxLevel"] = level
+
+        if "tempLimit" in fan:
+            limit = fan["tempLimit"]
+
+            if not isinstance(limit, (int, float)) or not 15 <= limit <= 40:
+                return "fan.tempLimit must be 15..40"
+
+            new_fan["tempLimit"] = limit
+
+    # zapis dopiero po walidacji calosci
+    if mode:
+        hum[mode] = band
+
+    if fan is not None:
+        hum["fan"] = new_fan
+
+    return None
+
+
 def _status():
     return {
         "uptime_s": utime.ticks_diff(
@@ -358,6 +432,7 @@ def _status():
         "waiting": _waiting,
         "stats": stats,
         "events": events.tail(),
+        "humidifier": humidifier.status(),
     }
 
 
@@ -572,6 +647,7 @@ async def _handle_request(reader, writer):
                         else "OFF"
                     ),
                     "fanLevel": _dimmer.get_level(),
+                    "humidifier": humidifier.status(),
                     # sila sygnalu WiFi (dBm) - aplikacja pokazuje ja w naglowku
                     "rssi": _wifi_rssi(),
                 }
@@ -652,6 +728,9 @@ async def _handle_request(reader, writer):
 
             if enabled:
                 apply_auto_logic()
+
+                if fan_auto_enabled():
+                    apply_fan_auto(force=True)
             elif fan_auto_enabled():
                 apply_fan_auto(force=True)
             else:
@@ -774,7 +853,7 @@ async def _handle_request(reader, writer):
                     "enabled",
                     False
                 ):
-                    if _should_light_be_on():
+                    if _should_light_be_on() and not fan_auto_enabled():
                         _dimmer.set_level(level)
                 elif not fan_auto_enabled():
                     _dimmer.set_level(level)
@@ -929,10 +1008,28 @@ async def _handle_request(reader, writer):
             await _drain(writer)
             return
 
+        # POST /api/humidifier  {"mode": "manual"|"auto", "enabled", "min",
+        # "max"} albo {"fan": {"maxLevel", "tempLimit"}} - pola opcjonalne
+
+        if method == "POST" and route == "/api/humidifier":
+            body_start = request.find("\r\n\r\n")
+            body = json.loads(request[body_start + 4:] or "{}")
+            error = _update_humidifier(body)
+
+            if error:
+                await _send_json(writer, cors, "400 Bad Request", {"error": error})
+                return
+
+            config_store.save(config)
+            humidifier.update(config, light_relay.get_state())
+            await _send_json(writer, cors, "200 OK", config["humidifier"])
+            return
+
         # POST /api/fan/auto/toggle
 
         if method == "POST" and path == "/api/fan/auto/toggle":
-            fa = config["fanAuto"]
+            # przelacza automat biezacego trybu (MANUAL albo AUTO)
+            fa = config[fan_auto.active_key(config)]
             fa["enabled"] = not fa["enabled"]
             config_store.save(config)
 
@@ -1019,10 +1116,30 @@ async def _handle_request(reader, writer):
                         "Flowering start date must be a string or null"
                     )
 
+                started_at = body.get("startedAt")
+
+                if (
+                        started_at is not None
+                        and not isinstance(started_at, str)
+                ):
+                    raise ValueError(
+                        "Flowering start time must be a string or null"
+                    )
+
                 if "auto" not in config:
                     config["auto"] = {}
 
+                # dokladna chwila startu (format jak w logu klimatu) - wykres
+                # w aplikacji stawia granice wege/kwitnienie tutaj, a nie
+                # o polnocy dnia startu. Bez startedAt: teraz.
+                if start_date is None:
+                    started_at = None
+                elif started_at is None:
+                    t = utime.localtime()
+                    started_at = "%04d-%02d-%02d %02d:%02d:%02d" % t[:6]
+
                 config["auto"]["floweringStartDate"] = start_date
+                config["auto"]["floweringStartedAt"] = started_at
 
                 config_store.save(config)
 
