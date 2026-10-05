@@ -4,7 +4,8 @@ MicroPython firmware for an ESP32 that runs a small grow box. It
 switches the light and the fan, controls the fan speed, logs the climate
 to an SD card and exposes everything through a small HTTP API.
 
-The phone app lives in [growbox-app](https://github.com/umatik/growbox-app).
+The phone app lives in [growbox-app](https://github.com/umatik/growbox-app),
+and a macOS desktop widget in `growbox-widget-macos`.
 
 ## Features
 
@@ -21,7 +22,11 @@ The phone app lives in [growbox-app](https://github.com/umatik/growbox-app).
   lights off and the night fan on, the fan runs at the fixed night level
   from the app.
 - **Humidifier** on a mini ESP (`Humidifier/main.py`) over ESP-NOW, with
-  separate Manual and Auto bands, only while the light is on.
+  separate Manual and Auto bands, only while the light is on. While it
+  runs, the auto fan stays at or below `humidifier.fan.maxLevel` unless
+  the temperature passes `tempLimit`. See [Humidifier](#humidifier-mini-esp).
+- **Flowering start time:** the exact moment flowering began is stored
+  next to the date, so the app's chart can mark it.
 - **Fan dimmer:** calibrated PWM range, plus a short kick-start so the
   fan spins up from standstill at low speeds.
 - **Climate log:** temperature and humidity go to the SD card every
@@ -57,6 +62,41 @@ The phone app lives in [growbox-app](https://github.com/umatik/growbox-app).
 | Display button + its LED  | GPIO 15, GPIO 16                |
 
 Pins and dimmer calibration live in `App/esp_config.py`.
+
+## Humidifier (mini ESP)
+
+An ESP32-C3 SuperMini sits inside an ultrasonic humidifier. The main ESP
+decides when it runs and sends the state over ESP-NOW; the mini switches
+a relay and reports back.
+
+- **Wiring:** the relay (HW-307, 5 V coil) is put in series with the
+  humidifier's water level sensor (the middle wire of its float switch).
+  Relay open = the humidifier sees "no water" and stops, so the float
+  still protects it from running dry. Nothing is switched on 230 V.
+- **Relay driver:** the HW-307 switches on a low input, and 3.3 V from
+  the ESP does not switch it off, so an NPN pulls IN to GND:
+  GPIO 4 → 1 kΩ → base (BC547), 10 kΩ base–GND, emitter to GND, collector
+  to IN. GPIO high = relay on; at boot / reset the 10 kΩ keeps it off.
+- **Power:** an LM2596 set to 5.0 V, fed from the humidifier's own supply
+  (+28 V on its CN1), powers the mini and the relay module.
+- **Safety:** relay off at boot, after 20 s without a message from the main
+  ESP, and on any error; hardware watchdog.
+- **Pairing:** none needed. The mini listens on channels 1-13 until an ESP
+  sends it a state, remembers that ESP in `main_mac.txt` and searches again
+  after a few missed rounds. The main ESP knows the mini by
+  `humidifier.peer` in its config.
+- **Protocol:** main → mini `HUM` + 0/1 every 5 s and on change, mini → main
+  `HST` + relay state.
+
+Flash it over USB (it has no OTA):
+
+```bash
+mpremote connect /dev/cu.usbmodem21101 cp Humidifier/main.py :main.py
+```
+
+`Humidifier/sim_humidity.py` and `Humidifier/sim_live.py` run the real
+humidifier logic on a spare ESP with a simulated humidity, for testing the
+whole chain without a sensor.
 
 ## First install (USB)
 
@@ -144,7 +184,8 @@ Every call needs `Authorization: Bearer <API_TOKEN>`.
 | POST   | `/api/fan/auto/toggle`          | Auto fan by temperature (Manual mode)       |
 | POST   | `/api/auto/night-fan/toggle`    | Keep the fan on at night (Auto mode)        |
 | POST   | `/api/light-schedule`           | `[{"on": "18:00", "off": "06:00"}]`         |
-| POST   | `/api/flowering/start-date`     | `{"date": "YYYY-MM-DD" \| null}`            |
+| POST   | `/api/flowering/start-date`     | `{"date": "YYYY-MM-DD" \| null, "startedAt"?}` (time defaults to now) |
+| POST   | `/api/humidifier`               | `{"mode": "manual"\|"auto", "enabled", "min", "max"}` and/or `{"fan": {"maxLevel", "tempLimit"}}` |
 | POST   | `/api/feeding`                  | `{"date": ISO}` log a watering              |
 | POST   | `/api/feeding/undo`             | `{"date": ISO}` remove it (no date = last)  |
 | POST   | `/api/display/toggle`           | OLED on / off                               |
@@ -155,6 +196,7 @@ Every call needs `Authorization: Bearer <API_TOKEN>`.
 | PUT    | `/api/files/<name>?sha256=...`  | Stage a `.py` / `.mpy` file for OTA         |
 | POST   | `/api/update/apply`             | Apply staged files and restart              |
 | POST   | `/api/update/discard`           | Drop staged files                           |
+| POST   | `/api/debug/dimmer`             | `{"duty": 0-1023, "freq"}` raw PWM, for calibration |
 
 Requests are handled one at a time. The ESP has little RAM, and parallel
 requests used to exhaust it.
@@ -165,10 +207,12 @@ requests used to exhaust it.
 App/            firmware (copied to the board root)
   app.py        startup, task supervisor, watchdog
   server.py     HTTP API, relays, schedule
-  fan_auto.py   fan speed from temperature
+  fan_auto.py   fan speed from temperature (Manual and flowering by day)
+  humidifier.py humidifier decision + ESP-NOW link to the mini ESP
   ota.py        OTA staging, apply, confirm (ota_http.py = its routes)
   sd_logger.py  climate log on the SD card
   ...
+Humidifier/     mini ESP firmware (main.py) and test scripts
 deploy.py       OTA client for your computer
 ```
 
