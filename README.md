@@ -16,9 +16,12 @@ The phone app lives in [growbox-app](https://github.com/umatik/growbox-app).
   stays on the lowest speed up to the middle of the band. Readings are
   rounded to 10 % steps with hysteresis, so sensor noise does not make
   the fan hunt.
-- **Night humidity guard** (Auto mode, night fan on): above
-  `auto.nightHumidity.ideal` the fan speeds up from the night level to
-  full speed at `max`.
+- **Auto fan in flowering** (Auto mode, lights on): the same curve with its
+  own targets (`fanAutoFlower`), since the lamp runs hotter. With the
+  lights off and the night fan on, the fan runs at the fixed night level
+  from the app.
+- **Humidifier** on a mini ESP (`Humidifier/main.py`) over ESP-NOW, with
+  separate Manual and Auto bands, only while the light is on.
 - **Fan dimmer:** calibrated PWM range, plus a short kick-start so the
   fan spins up from standstill at low speeds.
 - **Climate log:** temperature and humidity go to the SD card every

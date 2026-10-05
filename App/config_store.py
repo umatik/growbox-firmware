@@ -9,10 +9,8 @@ DEFAULT_CONFIG = {
         "floweringStartDate": None,
         # "YYYY-MM-DD HH:MM:SS" czasu lokalnego, ustawiane razem z data
         "floweringStartedAt": None,
+        # swiatlo OFF: wentylator na dimmer.night.level (bez automatu)
         "nightFan": {"enabled": False},
-        # kwitnienie, swiatlo OFF: sweet point wilgotnosci i poziom, przy
-        # ktorym wentylator idzie na maxLevel (fan_auto.night_humidity_level)
-        "nightHumidity": {"ideal": 50, "max": 55}
     },
     "relayLight": {"state": 0},
     "relayFan": {"state": 0},

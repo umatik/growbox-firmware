@@ -7,10 +7,9 @@
 # czujnika na granicy kroku nie szarpie wentylatorem.
 #
 # AUTO (kwitnienie): ta sama krzywa z osobnymi progami (fanAutoFlower),
-# bo lampa grzeje wtedy mocniej. Noc z wlaczonym nightFan: wilgotnosc nie moze
-# przekraczac sweet pointu. Powyzej auto.nightHumidity.ideal obroty rosna
-# od nocnego poziomu do maxLevel przy "max". Wracaja do nocnego poziomu
-# dopiero HUM_HYSTERESIS ponizej sweet pointu.
+# bo lampa grzeje wtedy mocniej - tylko przy zapalonym swietle. W nocy
+# (nightFan) obroty to staly poziom nocny z aplikacji (server.py); z
+# wilgotnoscia ich nie wiazemy, bo powietrze z pokoju bywa rownie wilgotne.
 import utime
 
 import humidifier
@@ -19,12 +18,10 @@ import sensor
 HEADROOM = 1
 STEP = 10
 HYSTERESIS = 0.3
-HUM_HYSTERESIS = 2
 # starszy odczyt = czujnik padl, nie sterujemy na slepo
 MAX_SENSOR_AGE_S = 120
 
 _last_temp = None
-_night_humid = False
 
 
 def active_key(config):
@@ -70,7 +67,8 @@ def apply(config, light_on, dimmer, force=False):
 
     cfg = _cfg(config)
 
-    if cfg is None:
+    # AUTO noc: staly poziom nocny ustawia server.apply_auto_logic
+    if cfg is None or (config["auto"]["enabled"] and not light_on):
         return
 
     data = sensor.get()
@@ -85,12 +83,6 @@ def apply(config, light_on, dimmer, force=False):
         temperature
     )
 
-    # AUTO noc: wilgotnosc ponad sweet point moze wymusic wiecej
-    if config["auto"]["enabled"] and not light_on:
-        humid_level = night_humidity_level(config, level)
-
-        if humid_level:
-            level = max(level, humid_level)
     current = dimmer.get_level()
 
     if level == current:
@@ -109,34 +101,3 @@ def apply(config, light_on, dimmer, force=False):
     print("FAN AUTO:", temperature, "C ->", level, "%")
     _last_temp = temperature
     dimmer.set_level(level)
-
-
-def night_humidity_level(config, base_level):
-    # AUTO noc: poziom wentylatora przy wilgotnosci ponad sweet point,
-    # None = wilgotnosc w normie albo brak swiezego odczytu
-    global _night_humid
-
-    band = config.get("auto", {}).get("nightHumidity")
-    data = sensor.get()
-    humidity = data["humidity"]
-
-    if not band or humidity is None or not _fresh(data):
-        _night_humid = False
-        return None
-
-    was_humid = _night_humid
-
-    if humidity > band["ideal"]:
-        _night_humid = True
-    elif humidity < band["ideal"] - HUM_HYSTERESIS:
-        _night_humid = False
-
-    if _night_humid != was_humid:
-        print("NIGHT HUMIDITY:", humidity, "% ->", _night_humid)
-
-    if not _night_humid:
-        return None
-
-    max_level = (_cfg(config) or config["fanAuto"])["maxLevel"]
-    ratio = _ratio(humidity, band["ideal"], band["max"])
-    return _step(base_level + (max_level - base_level) * ratio)
