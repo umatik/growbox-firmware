@@ -1,0 +1,7 @@
+# WiFi i token - tylko na plytce i na Twoim komputerze
+src/secrets.py
+
+__pycache__/
+*.mpy
+preview.png
+.DS_Store
