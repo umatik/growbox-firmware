@@ -510,6 +510,19 @@ def _header(request, name):
     return None
 
 
+# monitor TFT pyta o /api/config co 15 s z naglowkiem X-Client: monitor;
+# aplikacja pokazuje jego ustawienia tylko, gdy odezwal sie niedawno
+MONITOR_ONLINE_MS = 60000
+_monitor_seen = None
+
+
+def _monitor_online():
+    return (
+        _monitor_seen is not None
+        and utime.ticks_diff(utime.ticks_ms(), _monitor_seen) < MONITOR_ONLINE_MS
+    )
+
+
 async def _send_json(writer, cors, status_line, data):
     body = json.dumps(data)
 
@@ -535,6 +548,8 @@ async def _handle_ota(method, route, request, body, reader, writer, cors):
 
 
 async def _handle_request(reader, writer):
+    global _monitor_seen
+
     try:
         # upload = poczatek body PUT-a (OTA), dla reszty pusty
         request, upload = await _read_request(reader)
@@ -611,6 +626,9 @@ async def _handle_request(reader, writer):
         # GET /api/config
 
         if method == "GET" and path == "/api/config":
+            if _header(request, "x-client") == "monitor":
+                _monitor_seen = utime.ticks_ms()
+
             sensor_data = sensor.get()
 
             body = json.dumps({
@@ -638,6 +656,7 @@ async def _handle_request(reader, writer):
                     ),
                     "fanLevel": _dimmer.get_level(),
                     "humidifier": humidifier.status(),
+                    "monitorOnline": _monitor_online(),
                     # sila sygnalu WiFi (dBm) - aplikacja pokazuje ja w naglowku
                     "rssi": _wifi_rssi(),
                 }
@@ -1013,6 +1032,30 @@ async def _handle_request(reader, writer):
             config_store.save(config)
             humidifier.update(config, light_relay.get_state())
             await _send_json(writer, cors, "200 OK", config["humidifier"])
+            return
+
+        # POST /api/monitor  {"enabled": bool, "brightness": 5-100} - pola
+        # opcjonalne; monitor TFT odczytuje to przy nastepnym /api/config
+
+        if method == "POST" and route == "/api/monitor":
+            body_start = request.find("\r\n\r\n")
+            body = json.loads(request[body_start + 4:] or "{}")
+            mon = config["monitor"]
+
+            if "enabled" in body:
+                mon["enabled"] = bool(body["enabled"])
+
+            if "brightness" in body:
+                level = body["brightness"]
+
+                if not isinstance(level, (int, float)) or isinstance(level, bool):
+                    await _send_json(writer, cors, "400 Bad Request", {"error": "brightness must be a number"})
+                    return
+
+                mon["brightness"] = max(5, min(100, int(level)))
+
+            config_store.save(config)
+            await _send_json(writer, cors, "200 OK", mon)
             return
 
         # POST /api/fan/auto/toggle

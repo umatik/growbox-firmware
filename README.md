@@ -189,6 +189,7 @@ Every call needs `Authorization: Bearer <API_TOKEN>`.
 | POST   | `/api/feeding`                  | `{"date": ISO}` log a watering              |
 | POST   | `/api/feeding/undo`             | `{"date": ISO}` remove it (no date = last)  |
 | POST   | `/api/display/toggle`           | OLED on / off                               |
+| POST   | `/api/monitor`                  | `{"enabled", "brightness": 5-100}` TFT monitor screen; `status.monitorOnline` in `/api/config` says whether it polled in the last minute |
 | GET    | `/api/environment`              | Climate log: `limit`, `before`, `since`, `step` |
 | GET    | `/api/environment.csv`          | Climate log as CSV                          |
 | POST   | `/api/environment/erase`        | Clear the climate log                       |

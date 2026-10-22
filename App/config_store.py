@@ -29,6 +29,12 @@ DEFAULT_CONFIG = {
     "display": {
         "enabled": False,
     },
+    # monitor TFT (growbox-monitor) czyta to z /api/config: wylaczony =
+    # ciemny ekran, brightness = podswietlenie w dzien (noc ma swoje)
+    "monitor": {
+        "enabled": True,
+        "brightness": 100,
+    },
     # MANUAL (vege): poziom wentylatora wg temperatury. Progi jak VEG_TARGETS
     # w aplikacji - swiatlo ON 24-26 C, swiatlo OFF 20-22 C.
     "fanAuto": {
